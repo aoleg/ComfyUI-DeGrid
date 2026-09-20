@@ -1,2 +1,18 @@
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+output/
+*.egg-info/
+.claude/
+
+# Local context files — not for git. This is a PUBLIC repo; these are Peti's
+# working notes and must never ship to people cloning the node.
+CLAUDE.md
+STATUS.md
+AGENTS.md
