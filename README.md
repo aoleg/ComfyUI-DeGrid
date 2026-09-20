@@ -155,6 +155,26 @@ and per-image auto-calibration.
 
 ### 2026-09-20
 
+**In short:** the filter was fine — the thing deciding *when to run it* was broken.
+
+The node used to report how much fine detail an image had and call that "the grid".
+Those are not the same thing, so it got it backwards: on a real test set it called
+the cleanest image the most gridded one. And because it never really knew whether a
+grid was there, it filtered everything, always — quietly scraping a little genuine
+texture off images that had no grid at all.
+
+It now measures the grid itself. A VAE grid lands on the same pixel positions across
+the whole frame, so averaging those positions keeps the grid while ordinary detail
+cancels out. Gridded images measure about 1.6–2.0/255, grid-free ones about 0.1 —
+a wide, unambiguous gap. If there is no grid, the image is now passed through
+**completely untouched**, which matters most for anything that has already been
+through an upscaler or a resize.
+
+**The maths that removes the grid did not change.** On an image that really has a
+grid you get exactly the same result as before.
+
+The detail, for anyone who wants it:
+
 - **Qwen Image 2.1 confirmed affected.** It ships a genuinely different VAE —
   `modelspec.architecture: qwen_image_2.1_vae`, a 64-channel latent and four
   spatial upsample stages, against 16 channels and three for the Qwen-Image /
