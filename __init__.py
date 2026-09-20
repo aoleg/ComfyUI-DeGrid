@@ -13,9 +13,17 @@ def _status_line(mode: str, stats: list) -> str:
     lim = s["limit"]
     src = "auto" if mode == "auto" else "manual"
     if amp < NEGLIGIBLE_AMP * 255.0:
-        verdict = f"grid ≈ {amp:.2f}/255 — negligible, image already clean"
+        state = "passed through untouched" if s["skipped"] else "filtered anyway"
+        verdict = f"grid {amp:.2f}/255 — none detected, {state}"
     else:
-        verdict = f"grid ≈ {amp:.2f}/255 — removed (limit {lim:.3f} {src})"
+        # name the dominant orientation: it says which stage left the lattice
+        parts = (
+            ("checker", s["checker_255"]),
+            ("V-stripe", s["vstripe_255"]),
+            ("H-stripe", s["hstripe_255"]),
+        )
+        kind = max(parts, key=lambda p: p[1])[0]
+        verdict = f"grid {amp:.2f}/255 ({kind}) — removed (limit {lim:.3f} {src})"
     line = f"{verdict} · edges protected: {s['clipped_pct']:.1f}%"
     if len(stats) > 1:
         line += f" · batch of {len(stats)} (first shown)"
@@ -30,13 +38,17 @@ class VAEDeGrid(io.ComfyNode):
             display_name="VAE DeGrid (Nyquist Notch)",
             category="image/postprocessing",
             description=(
-                "Removes the 2px pixel grid left by the Qwen Image / Wan 2.1 VAEs "
-                "(Krea2, Qwen Image, Anima...). Wire directly after VAE Decode, "
-                "before any sharpening or upscaling.\n\n"
+                "Removes the 2px pixel grid left by the Qwen Image / Qwen Image 2.1 "
+                "/ Wan 2.1 VAEs (Krea2, Qwen Image, Anima...). Wire directly after "
+                "VAE Decode, before any resize, sharpening or upscaling — and before "
+                "a restorer like SeedVR2, which will otherwise treat the lattice as "
+                "detail worth reconstructing.\n\n"
                 "Defaults are the zero-config path: leave mode on 'auto' and the node "
-                "measures each image and calibrates itself. After a run, the node shows "
-                "the measured grid strength, so you can see it did something even if "
-                "the change is invisible at normal zoom.\n\n"
+                "measures each image and calibrates itself. It measures the lattice "
+                "itself, not just how detailed the image is, so an image that never "
+                "had a grid is reported as clean and passed through untouched. After "
+                "a run, the node shows the measured grid strength and which "
+                "orientation dominates.\n\n"
                 "The removed_grid output shows WHAT was subtracted. The artifact is "
                 "only 2px, so in 'full frame' view it looks like faint gray noise — "
                 "that is correct behavior, not a failure. Switch grid_view to 4x/8x "
@@ -64,6 +76,16 @@ class VAEDeGrid(io.ComfyNode):
                             "0.005-0.02, so 0.02 is a good start. Too low = grid "
                             "partially survives in contrasty areas. Too high = fine "
                             "2-3px texture (pores, fabric) gets slightly softened.",
+                ),
+                io.Boolean.Input(
+                    "skip_when_clean", default=True,
+                    tooltip="Leave the image completely untouched when no grid is "
+                            "actually there. The node measures the lattice directly "
+                            "(its phase is locked to the VAE's output stride, so it "
+                            "survives averaging while real detail cancels), and an "
+                            "image with none — anything that has been through an "
+                            "upscaler or a resize — is passed through bit-for-bit. "
+                            "Turn this off only to force the filter to run regardless.",
                 ),
                 io.Float.Input(
                     "grid_gain", default=10.0, min=1.0, max=50.0, step=1.0,
@@ -100,7 +122,8 @@ class VAEDeGrid(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, image, enabled, mode, limit, grid_gain, grid_view):
+    def execute(cls, image, enabled, mode, limit, grid_gain, grid_view,
+                skip_when_clean=True):
         if not enabled:
             return io.NodeOutput(
                 image, torch.full_like(image, 0.5),
@@ -108,6 +131,7 @@ class VAEDeGrid(io.ComfyNode):
             )
         cleaned, vis, stats = degrid(
             image, mode=mode, limit=limit, grid_gain=grid_gain, grid_view=grid_view,
+            skip_when_clean=skip_when_clean,
         )
         return io.NodeOutput(cleaned, vis, ui=ui.PreviewText(_status_line(mode, stats)))
 
