@@ -89,6 +89,38 @@ class CoreTests(unittest.TestCase):
         _, _, st_rgb = core.degrid(rgba[..., :3])
         self.assertAlmostEqual(st[0]["amp_255"], st_rgb[0]["amp_255"], places=5)
 
+    def test_auto_raises_the_limit_until_the_grid_is_gone(self):
+        # A grid that is faint over most of the frame but strong in one band: the
+        # 75th-percentile guess fits the faint part and clamps the band away.
+        base = stubs.smooth_image(H, W)
+        faint = stubs.add_lattice(base, 0.5, 0.5)
+        strong = stubs.add_lattice(base, 6.0, 6.0)
+        img = faint.clone()
+        img[:, :, : H // 4, :] = strong[:, :, : H // 4, :]
+        x = img.permute(0, 2, 3, 1)
+        corr = core.extract_grid(img)
+        guess = core.auto_limit(corr)[0].item()
+        chosen = core.auto_limit_targeted(corr)[0].item()
+        self.assertGreater(core.residual_after_clamp(corr, torch.tensor([guess]))[0].item() * 255, 0.5)
+        self.assertGreater(chosen, guess)
+        self.assertLessEqual(chosen, 0.05 + 1e-6)  # float32 ceiling
+        cleaned, _, st = core.degrid(x, mode="auto")
+        self.assertAlmostEqual(st[0]["limit"], chosen, places=6)
+        self.assertLess(st[0]["residual_255"], 0.25 + 1e-6)
+        self.assertLess(lattice_255(cleaned), 0.3)
+        self.assertIn("\u2014 removed", core.status_line("auto", st))
+        # the residual measurement is exact: it matches a direct measurement of the output
+        self.assertAlmostEqual(st[0]["residual_255"], lattice_255(cleaned), delta=0.05)
+        # an easy image stops at the first rung
+        easy = stubs.add_lattice(base).permute(0, 2, 3, 1)
+        _, _, st_easy = core.degrid(easy, mode="auto")
+        self.assertAlmostEqual(st_easy[0]["limit"], core.auto_limit(core.extract_grid(easy.permute(0, 3, 1, 2)))[0].item(), places=6)
+        # batch: each image gets its own rung
+        both = torch.cat([x, easy], dim=0)
+        _, _, st_both = core.degrid(both, mode="auto")
+        self.assertAlmostEqual(st_both[0]["limit"], chosen, places=6)
+        self.assertAlmostEqual(st_both[1]["limit"], st_easy[0]["limit"], places=6)
+
     def test_residual_reports_what_the_clamp_left(self):
         x = stubs.add_lattice(stubs.smooth_image(H, W)).permute(0, 2, 3, 1)
         cleaned, _, st = core.degrid(x, mode="manual", limit=0.001)

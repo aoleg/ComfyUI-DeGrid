@@ -101,6 +101,58 @@ def auto_limit(
     return (q * mult).clamp(floor, ceil).to(corr.dtype)
 
 
+# Auto mode raises the clamp until the lattice left behind is under this
+# fraction of the clean threshold (0.25/255 at the default threshold).
+AUTO_TARGET_FRACTION = 0.5
+AUTO_LADDER_RATIO = 1.5
+
+
+def residual_after_clamp(corr: torch.Tensor, lim: torch.Tensor) -> torch.Tensor:
+    """Phase-locked lattice that survives clamping corr to +-lim. [B] in 0..1 units.
+
+    Exact, not an estimate: the sublattice means are linear and the notch has
+    unit response at the three 2px frequencies, so the lattice in (x - clamp(corr))
+    equals the lattice in (corr - clamp(corr)). No second filter pass needed.
+    """
+    lim_b = lim.view(-1, 1, 1, 1)
+    return lattice_amp(corr - corr.clamp(-lim_b, lim_b))[0]
+
+
+def auto_limit_targeted(
+    corr: torch.Tensor,
+    threshold: float = NEGLIGIBLE_AMP,
+    floor: float = 0.004,
+    ceil: float = 0.05,
+    mult: float = 3.0,
+    ratio: float = AUTO_LADDER_RATIO,
+    target_fraction: float = AUTO_TARGET_FRACTION,
+) -> torch.Tensor:
+    """Per-image clamp limit that actually clears the grid.
+
+    Starts from auto_limit() (a robust guess from the notch band's 75th
+    percentile) and, image by image, steps it up by `ratio` until the residual
+    lattice drops under `threshold * target_fraction`, or `ceil` is reached.
+    On a Krea 2 decode the first or second rung is enough; a Qwen Image 2.1
+    decode carries a heavier notch-band tail and needs 0.03-0.05, where the
+    percentile guess alone left a third of the grid behind (measured 2026-09-21).
+    Each rung costs a clamp and four sublattice means, nothing more.
+    Returns [B] tensor of limits.
+    """
+    lim = auto_limit(corr, floor, ceil, mult)
+    target = float(threshold) * float(target_fraction)
+    chosen = lim.clone()
+    done = torch.zeros(corr.shape[0], dtype=torch.bool, device=corr.device)
+    cand = lim.clone()
+    while True:
+        resid = residual_after_clamp(corr, cand)
+        chosen = torch.where(done, chosen, cand)
+        done = done | (resid <= target)
+        if bool(done.all()) or bool((cand >= ceil).all()):
+            break
+        cand = torch.where(done, cand, (cand * ratio).clamp(max=ceil))
+    return chosen
+
+
 def zoom_center(x: torch.Tensor, factor: int) -> torch.Tensor:
     """Nearest-neighbor magnification of the center crop, for previewing
     the 2px lattice at a scale where it is actually visible.
@@ -138,6 +190,10 @@ def degrid(
     threshold: lattice amplitude (0..1 units) below which an image counts as
     clean. Defaults to NEGLIGIBLE_AMP (0.5/255).
 
+    In "auto" mode the clamp limit is raised per image until the lattice left
+    behind is under half of `threshold` (see auto_limit_targeted); "manual"
+    uses `limit` as given.
+
     Returns (cleaned, grid_vis, stats): cleaned matches the input shape and
     dtype; grid_vis is the removed component amplified and centered on 0.5
     gray; stats is a list of per-image dicts with:
@@ -166,7 +222,7 @@ def degrid(
     texture = torch.quantile(flat, 0.75, dim=1)  # [B]
 
     if mode == "auto":
-        lim = auto_limit(corr)  # [B]
+        lim = auto_limit_targeted(corr, threshold=threshold)  # [B]
     else:
         lim = torch.full((x.shape[0],), float(limit), dtype=corr.dtype, device=corr.device)
     lim_b = lim.view(-1, 1, 1, 1)

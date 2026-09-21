@@ -71,7 +71,7 @@ and search for **degrid**.
 | Widget | Default | What it does |
 |---|---|---|
 | `enabled` | on | Off = the image passes through completely untouched. Flip it for a quick A/B comparison. |
-| `mode` | `auto` | **auto (recommended):** measures the grid strength per image and sets the removal limit itself — nothing to tune, adapts to different VAEs and content. **manual:** uses the `limit` widget instead. Only switch if auto visibly under- or over-corrects. |
+| `mode` | `auto` | **auto (recommended):** measures the grid strength per image and sets the removal limit itself — nothing to tune, adapts to different VAEs and content. Starts from a robust guess and raises the limit, in 1.5× steps up to 0.05, until the lattice left in the image is under half the `threshold`. **manual:** uses the `limit` widget instead. Only switch if auto visibly under- or over-corrects. |
 | `limit` | 0.02 | **Manual mode only** (ignored in auto). Maximum per-pixel correction on the 0–1 scale. The VAE grid is usually 0.005–0.02. Too low → grid partially survives in contrasty areas. Too high → fine 2–3px texture (skin pores, fabric weave) gets slightly softened. |
 | `skip_when_clean` | on | Leave the image completely untouched when no grid is actually there. The node measures the lattice directly, so anything that has already been through an upscaler or a resize is passed through **bit-for-bit**. Turn it off only to force the filter to run regardless. |
 | `grid_gain` | 10 | Brightness amplification of the `removed_grid` preview **only** — never affects the cleaned image. Raise it if the preview looks like flat gray. |
@@ -332,9 +332,15 @@ without banding.
 
 The correction is then amplitude-clamped before subtraction, so strong real
 edges and legitimate fine texture pass through unsoftened — only the
-low-amplitude artifact band is removed. In `auto` mode the clamp limit is
-estimated per image from a robust percentile of the extracted grid component,
-so it adapts to different VAEs, LoRA stacks, and content automatically.
+low-amplitude artifact band is removed. In `auto` mode the clamp limit starts
+from a robust percentile of the extracted grid component and is then raised,
+per image, until the lattice that would survive the clamp is under half the
+clean threshold (or the 0.05 ceiling is reached). The survivor is measured
+exactly, without a second filter pass: the sublattice means are linear, so the
+lattice left in the cleaned image equals the lattice in the part of the
+correction the clamp cut off. Krea 2 decodes settle at the first or second
+step; Qwen Image 2.1 decodes carry a heavier tail in the notch band and need
+0.03–0.05, where the percentile guess alone left a third of the grid behind.
 
 Separately from the clamp, the node decides *whether there is a grid at all* by
 measuring the phase-locked lattice (see **Status line** above). Measured across
@@ -378,6 +384,13 @@ and per-image auto-calibration.
   prints its status line to the backend console.
 - **RGBA decodes** (Qwen Image 2.1) are filtered on colour only; alpha passes
   through untouched and is excluded from the measurement.
+- **Auto mode now targets the residual.** On Qwen Image 2.1 decodes the
+  percentile-based limit (0.009) capped nearly a tenth of the pixels and left
+  0.7/255 of a 1.9/255 grid in place; the status line said so, and now auto
+  acts on it. The limit is raised per image, in 1.5× steps up to 0.05, until
+  the lattice left behind is under half the clean threshold. Krea 2 results
+  move by at most one step; the exact per-image limit is still reported in the
+  status line and `stats["limit"]`.
 
 ### 2026-09-20
 
