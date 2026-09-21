@@ -213,6 +213,52 @@ Settings are saved to the image parameters as `DeGrid: mode=auto;skip=1;threshol
   needed; the hook wiring, the decode topology (direct, tiled, OOM fallback),
   the hires double pass and the parameter round trip are all covered offline.
 
+## Swapping the decoder instead
+
+A recurring suggestion is to avoid the grid by not using the Qwen decoder at
+all. Two versions of that idea, measured:
+
+**A different VAE family (Flux, Flux 2) does not fit.** Krea 2, Qwen Image and
+Wan read and write the 16-channel Wan latent space. Every step that samples with
+one of those models must encode with the Qwen/Wan encoder and decode with a
+Wan-latent decoder, so a Flux VAE can only ever be used for a pure
+encode-decode round trip with no sampling in between. That round trip removes
+the 2px lattice because the pattern cannot pass the bottleneck, but it also
+re-synthesizes every other 2-4px detail through a different decoder. The notch
+removes only the 2px band and adds nothing.
+
+**A different decoder for the same latent space does work.** The
+[Wan2.1 VAE upscale2x](https://huggingface.co/spacepxl/Wan2.1-VAE-upscale2x)
+checkpoint is a decoder-only finetune whose last conv emits 12 channels, pixel-
+shuffled into a 2x image (available in Forge Neo through
+[Neo-VAE-Utils](https://github.com/aoleg/Neo-VAE-Utils)). Measured with the real
+weights, on three 1536px inputs, lattice peak-to-peak in /255:
+
+| input | input | 2x decode | 1x gaussian | 1x bilinear | 1x area | 1x lanczos |
+|---|---|---|---|---|---|---|
+| Krea 2, gridded | 2.54 | 1.30 | 0.03 | 0.04 | 0.11 | 0.06 |
+| Krea 2, degridded | 0.32 | 1.22 | 0.02 | 0.03 | 0.07 | 0.05 |
+| Z-Image (Flux VAE) | 0.07 | 1.06 | 0.03 | 0.04 | 0.08 | 0.06 |
+
+- **The lattice is made by the decoder, not carried in the latent.** A grid-free
+  input produces the same 2x lattice as a gridded one, and a gridded input's
+  lattice does not survive the encoder. Degridding before a re-encode only
+  protects whatever reads the pixels in between (an upscaler, a restorer); the
+  next Qwen decode always adds a fresh grid, which is why the Forge extension
+  filters every decode rather than the final image.
+- **At 2x the upscale decoder is gridded too**, at about half the stock
+  amplitude, vertical stripes dominant, phase-locked across the whole frame.
+  Use DeGrid after it. In Forge the two extensions compose on their own.
+- **Downscaled back to 1x it is clean.** Every filter leaves at most 0.11/255
+  (area, a 2-tap box); gaussian and bilinear leave 0.02-0.04, and DeGrid
+  reports `none detected` and passes the image through. The round trip
+  reconstructs Wan-native content at 39-41 dB PSNR.
+
+So for a plain decode the two routes reach the same place. The notch costs a
+few milliseconds and covers every decode path; the upscale decoder is a full
+decode at four times the pixel count, but also gives real 2x output when that
+is what you want.
+
 ## How it works
 
 A separable Nyquist notch: 9-tap alternating-sign binomial kernel
@@ -258,6 +304,10 @@ and per-image auto-calibration.
   claiming "removed" for whatever the detector saw. `stats` gains
   `residual_255`. The `edges protected` figure lost its colon so Forge does not
   quote the value in the parameters.
+- README: measured the Wan2.1 VAE upscale2x decoder as an alternative to
+  degridding (see [Swapping the decoder instead](#swapping-the-decoder-instead)):
+  gridded at 2x, clean after its own downscale to 1x; the lattice comes from
+  the decoder, not the latent.
 
 ### 2026-09-20
 
