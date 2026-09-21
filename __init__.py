@@ -4,30 +4,11 @@ import torch
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io, ui
 
-from .degrid_core import degrid, NEGLIGIBLE_AMP
+from .degrid_core import degrid, status_line
 
 
 def _status_line(mode: str, stats: list) -> str:
-    s = stats[0]
-    amp = s["amp_255"]
-    lim = s["limit"]
-    src = "auto" if mode == "auto" else "manual"
-    if amp < NEGLIGIBLE_AMP * 255.0:
-        state = "passed through untouched" if s["skipped"] else "filtered anyway"
-        verdict = f"grid {amp:.2f}/255 — none detected, {state}"
-    else:
-        # name the dominant orientation: it says which stage left the lattice
-        parts = (
-            ("checker", s["checker_255"]),
-            ("V-stripe", s["vstripe_255"]),
-            ("H-stripe", s["hstripe_255"]),
-        )
-        kind = max(parts, key=lambda p: p[1])[0]
-        verdict = f"grid {amp:.2f}/255 ({kind}) — removed (limit {lim:.3f} {src})"
-    line = f"{verdict} · edges protected: {s['clipped_pct']:.1f}%"
-    if len(stats) > 1:
-        line += f" · batch of {len(stats)} (first shown)"
-    return line
+    return status_line(mode, stats)
 
 
 class VAEDeGrid(io.ComfyNode):

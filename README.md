@@ -1,6 +1,6 @@
 # ComfyUI-DeGrid
 
-One node: **VAE DeGrid (Nyquist Notch)** — removes the 2px pixel grid that the
+**VAE DeGrid (Nyquist Notch)** — a ComfyUI node and a Forge Neo extension that remove the 2px pixel grid that the
 Qwen Image VAE (and, to a lesser extent, the Wan 2.1 VAE) leaves across decoded
 images. Affects Krea2, Qwen Image, **Qwen Image 2.1**, Anima and anything else
 built on those VAEs.
@@ -12,7 +12,20 @@ auto-calibration so there is nothing to tune.
 It reads worst in flat, dark areas — a lattice of fixed amplitude has the most
 local contrast to sit against where the image itself is smooth.
 
-## Install
+## Front ends
+
+One repo, one set of maths (`degrid_core.py`), several hosts:
+
+| Host | Where it lives | Status |
+|---|---|---|
+| ComfyUI | `__init__.py` at the repo root (node **VAE DeGrid (Nyquist Notch)**) | shipped |
+| Forge Neo | `scripts/degrid_forge.py` + `lib_degrid/` (accordion **VAE DeGrid**) | shipped, see [Forge Neo](#forge-neo) |
+| SwarmUI | planned | — |
+
+Cloning the repo into either host's extension folder is enough; each host only
+loads its own entry point and ignores the others.
+
+## Install (ComfyUI)
 
 ```
 cd ComfyUI/custom_nodes
@@ -36,14 +49,14 @@ and search for **degrid**.
 3. Run once. The node displays a status line, e.g.:
 
    ```
-   grid 2.10/255 (checker) — removed (limit 0.019 auto) · edges protected: 1.2%
+   grid 2.10/255 (checker) — removed (limit 0.019 auto) · edges protected 1.2%
    ```
 
    That readout is your confirmation it worked — you don't need to pixel-peep.
    On an image that has no grid you get this instead, and nothing is changed:
 
    ```
-   grid 0.16/255 — none detected, passed through untouched · edges protected: 0.0%
+   grid 0.16/255 — none detected, passed through untouched · edges protected 0.0%
    ```
 
 > **Order matters more than it looks.** Put this straight after `VAE Decode`,
@@ -81,7 +94,11 @@ After each run the node shows what it measured:
   content is in this image" is not the same question as "is there a grid", and
   answering the first one gets it backwards on a busy image.
 - **`limit N (auto|manual)`** — the correction cap that was applied.
-- **`edges protected: N%`** — percentage of pixels where the correction hit the
+- **`partially removed, X/255 left`** — the cap was lower than the grid's own
+  amplitude, so part of the lattice survived. The node measures what is left
+  in the cleaned image rather than assuming the notch got it all. Raise the
+  limit (or go back to `auto`).
+- **`edges protected N%`** — percentage of pixels where the correction hit the
   cap. Those are real edges/detail being passed through unsoftened. A few
   percent is normal; a very high number means lots of legitimate
   high-frequency content (or a manual limit set too low).
@@ -122,6 +139,80 @@ over detailed areas). Recognizable *detail* is not.
 | You want it to filter anyway | Turn `skip_when_clean` off. The status line then reads `none detected, filtered anyway`. |
 | removed_grid looks like flat gray | Raise `grid_gain`, or the image simply has no grid |
 
+## Forge Neo
+
+The same filter as a [Forge Neo](https://github.com/Haoming02/sd-webui-forge-classic/tree/neo)
+extension, for the Wan-VAE models Forge Neo runs (Krea 2, Qwen Image, Wan, Anima).
+
+```
+cd <forge-neo>/extensions
+git clone https://github.com/aoleg/ComfyUI-DeGrid
+```
+
+Restart the webui. A **VAE DeGrid** accordion appears on the txt2img and img2img
+tabs, off by default. Tick it and generate; the console prints one line per VAE
+decode, e.g.
+
+```
+DeGrid: 1536x1536 | grid 2.54/255 (V-stripe) - removed (limit 0.010 auto) | edges protected 2.9%
+```
+
+and the same verdict is written into the image's parameters as `DeGrid result`.
+
+### Where it runs, and why that matters
+
+In Forge the filter is not an image post-process. The extension replaces the
+checkpoint's VAE, for the duration of each sampling pass, with a wrapper that
+runs the notch inside every decode. Two things follow:
+
+- **Hires fix is handled correctly.** Forge decodes the first pass and hands the
+  pixels straight to the hires upscaler with no extension hook in between. An
+  image-level hook would leave the grid under the upscaler, exactly the case the
+  ComfyUI section above warns about. Decode-level filtering cleans the first pass
+  *before* the upscaler sees it, then the final decode again. Latent-space hires
+  upscalers only decode once, at the end, which is also covered.
+- **Nothing else changes.** Encoding (img2img, inpainting, hires re-encode) is the
+  checkpoint's own, untouched. The wrapper shares the loaded VAE weights, so
+  there is no second model in memory, and tiled decoding and the out-of-memory
+  fallback go through the same filter. Any extension that installs its own VAE
+  subclass (e.g. an upscaling decoder) still works: its decode runs first and
+  the notch runs on its output, where it will usually find nothing to remove.
+
+A measured 2px lattice from the real Forge Neo Krea 2 decodes used to validate
+this: 1.4 to 2.5/255 before, 0.05 to 0.2/255 after. The same images generated
+with a Flux VAE measure 0.07 to 0.09/255 and are passed through untouched.
+
+### Controls
+
+| Control | Default | What it does |
+|---|---|---|
+| Mode | `auto` | Same as the node's `mode`: `auto` measures each image and sets the removal limit; `manual` uses the slider. |
+| Limit (manual mode) | 0.02 | Same as the node's `limit`; ignored in `auto`. |
+| Skip when clean | on | Same as the node's `skip_when_clean`. |
+| Clean threshold (/255) | 0.5 | New in Forge: the lattice amplitude below which an image counts as clean and is left alone. Forge Neo Krea 2 decodes have measured as low as 0.47/255, just under the default, so lower it (0.3) if the console reports `none detected` on a model you know is gridded. Raise it to be more conservative. |
+| Show removed grid | off | Adds a magnified centre crop of the subtracted component to the results, one per final image, so you can see the lattice without pixel-peeping. |
+| Preview zoom, Preview gain | `8x`, 10 | Framing and brightness of that preview only; the cleaned image is never affected. |
+
+Settings are saved to the image parameters as `DeGrid: mode=auto;skip=1;threshold=0.5`
+(plus `limit=` in manual mode) and restore from the paste button.
+
+### Notes
+
+- **Order relative to other decode-side extensions.** DeGrid installs its VAE
+  wrapper early (`sorting_priority = 10`), so an extension that swaps the VAE
+  later, such as Neo VAE Utils, replaces the wrapper rather than being wrapped by
+  it. Its decode then runs without DeGrid, which is the right outcome for an
+  upscaling decoder that already averages the grid away.
+- **Batches.** Each image in a batch is measured and limited on its own. The
+  console line carries `[i/n]`; the parameters carry the first image's verdict.
+- **Interrupted runs.** The swap is scoped to one sampling pass by Forge itself
+  and is additionally undone at the end of every run and at the start of the
+  next, so an interrupted generation cannot leave the wrapper installed.
+- **Tests.** `python -m unittest discover -s tests -v` from the repo root, with
+  any venv that has torch, numpy and Pillow. No Forge checkout or checkpoint is
+  needed; the hook wiring, the decode topology (direct, tiled, OOM fallback),
+  the hires double pass and the parameter round trip are all covered offline.
+
 ## How it works
 
 A separable Nyquist notch: 9-tap alternating-sign binomial kernel
@@ -152,6 +243,21 @@ reimplemented in pure PyTorch with a narrower 9-tap kernel, amplitude limiting,
 and per-image auto-calibration.
 
 ## Changelog
+
+### 2026-09-21
+
+- **Forge Neo extension.** The same node, as a `VAE DeGrid` accordion in
+  [Forge Neo](#forge-neo). It filters inside the VAE decode rather than after it,
+  so the hires-fix first pass is cleaned before the upscaler sees it. Adds a
+  `Clean threshold` control (the node keeps its fixed 0.5/255).
+- `degrid_core.degrid()` takes an optional `threshold` (default unchanged), and
+  the status-line text moved into `degrid_core.status_line()` so every front end
+  describes a result in the same words. Cleaned images are identical to before.
+- The status line now says **partially removed** when the clamp limit was too
+  low to subtract the whole grid, with the residual amplitude, instead of
+  claiming "removed" for whatever the detector saw. `stats` gains
+  `residual_255`. The `edges protected` figure lost its colon so Forge does not
+  quote the value in the parameters.
 
 ### 2026-09-20
 

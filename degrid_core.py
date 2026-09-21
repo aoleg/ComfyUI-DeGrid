@@ -121,8 +121,9 @@ def degrid(
     grid_gain: float = 10.0,
     grid_view: str = "full frame",
     skip_when_clean: bool = True,
+    threshold: float = NEGLIGIBLE_AMP,
 ):
-    """Run the notch filter on a ComfyUI image batch.
+    """Run the notch filter on an image batch.
 
     image: [B, H, W, C] in 0..1.
     grid_view: "full frame", "4x zoom" or "8x zoom" — framing of the
@@ -132,6 +133,9 @@ def degrid(
     skip_when_clean: leave an image completely untouched when no phase-locked
     lattice is detected. Without it the notch still shaves ~1/255 of genuine
     fine texture off an image that never had a grid.
+
+    threshold: lattice amplitude (0..1 units) below which an image counts as
+    clean. Defaults to NEGLIGIBLE_AMP (0.5/255).
 
     Returns (cleaned, grid_vis, stats): cleaned matches the input shape and
     dtype; grid_vis is the removed component amplified and centered on 0.5
@@ -144,6 +148,9 @@ def degrid(
       limit       clamp limit actually applied (auto or manual)
       clipped_pct percent of pixels where the correction hit the clamp
                   (those are real edges being protected)
+      residual_255 phase-locked lattice left in the cleaned image, /255 units;
+                  above ~threshold means the clamp limit was too low to
+                  remove the grid, not that the notch missed it
       skipped     True if the image was passed through untouched as clean
     """
     orig_dtype = image.dtype
@@ -160,15 +167,21 @@ def degrid(
         lim = torch.full((x.shape[0],), float(limit), dtype=corr.dtype, device=corr.device)
     lim_b = lim.view(-1, 1, 1, 1)
     clipped = (corr.abs() > lim_b).float().mean(dim=(1, 2, 3)) * 100.0  # [B] %
+    corr_raw = corr
     corr = corr.clamp(-lim_b, lim_b)
+    # Lattice left in the cleaned image = lattice(x) - lattice(corr): the
+    # sublattice means are linear, and extract_grid has unit response at the
+    # three 2px frequencies, so measuring the unremoved part is exact.
+    residual = lattice_amp(corr_raw - corr)[0]  # [B]
 
     # No lattice -> subtract nothing. The notch is cheap but not free: on a
     # clean, detailed image it still removes ~1/255 of real high-frequency
     # detail, and a SeedVR2 / upscaler output has no grid left to remove.
-    skipped = amp < NEGLIGIBLE_AMP
+    skipped = amp < float(threshold)
     if skip_when_clean:
         corr = torch.where(skipped.view(-1, 1, 1, 1), torch.zeros_like(corr), corr)
         clipped = torch.where(skipped, torch.zeros_like(clipped), clipped)
+        residual = torch.where(skipped, amp, residual)
 
     cleaned = (x - corr).clamp(0.0, 1.0)
     vis = (corr * float(grid_gain) + 0.5).clamp(0.0, 1.0)
@@ -189,8 +202,42 @@ def degrid(
             "hstripe_255": hst[i].item() * 255.0,
             "limit": lim[i].item(),
             "clipped_pct": clipped[i].item(),
+            "residual_255": residual[i].item() * 255.0,
             "skipped": bool(skipped[i].item()) and skip_when_clean,
         }
         for i in range(x.shape[0])
     ]
     return cleaned, vis, stats
+
+
+def status_line(mode: str, stats: list, threshold: float = NEGLIGIBLE_AMP) -> str:
+    """One-line human-readable verdict for a degrid() stats list.
+
+    Shared by every front end (ComfyUI node text, Forge Neo console/infotext)
+    so they all describe a result in the same words.
+    """
+    s = stats[0]
+    amp = s["amp_255"]
+    lim = s["limit"]
+    src = "auto" if mode == "auto" else "manual"
+    if amp < float(threshold) * 255.0:
+        state = "passed through untouched" if s["skipped"] else "filtered anyway"
+        verdict = f"grid {amp:.2f}/255 — none detected, {state}"
+    else:
+        # name the dominant orientation: it says which stage left the lattice
+        parts = (
+            ("checker", s["checker_255"]),
+            ("V-stripe", s["vstripe_255"]),
+            ("H-stripe", s["hstripe_255"]),
+        )
+        kind = max(parts, key=lambda p: p[1])[0]
+        residual = s.get("residual_255", 0.0)
+        if residual >= float(threshold) * 255.0:
+            verdict = f"grid {amp:.2f}/255 ({kind}) — partially removed, {residual:.2f}/255 left (limit {lim:.3f} {src} too low)"
+        else:
+            verdict = f"grid {amp:.2f}/255 ({kind}) — removed (limit {lim:.3f} {src})"
+    # no colon in the line: Forge JSON-quotes any infotext value containing one
+    line = f"{verdict} · edges protected {s['clipped_pct']:.1f}%"
+    if len(stats) > 1:
+        line += f" · batch of {len(stats)} (first shown)"
+    return line
