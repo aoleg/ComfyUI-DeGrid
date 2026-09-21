@@ -147,10 +147,89 @@ def auto_limit_targeted(
         resid = residual_after_clamp(corr, cand)
         chosen = torch.where(done, chosen, cand)
         done = done | (resid <= target)
-        if bool(done.all()) or bool((cand >= ceil).all()):
+        if bool((done | (cand >= ceil)).all()):  # every entry is satisfied or has nowhere left to go
             break
         cand = torch.where(done, cand, (cand * ratio).clamp(max=ceil))
     return chosen
+
+
+# Auto mode calibrates per tile of this many pixels, then blends the tile limits
+# into a smooth per-pixel map. The grid rides on texture: on a Qwen Image 2.1
+# desert it measured 0.7/255 in the sky and 8.8/255 on the ground, and one
+# frame-wide limit high enough for the ground shaved the twigs against the sky.
+AUTO_TILE = 256
+
+
+def _pad_to_multiple(x: torch.Tensor, t: int) -> torch.Tensor:
+    h, w = x.shape[-2:]
+    ph, pw = (-h) % t, (-w) % t
+    if ph or pw:
+        x = F.pad(x, (0, pw, 0, ph), mode="replicate")
+    return x
+
+
+def _tile_quantile_abs(corr: torch.Tensor, t: int, q: float = 0.75) -> torch.Tensor:
+    """q-quantile of |corr| per t x t tile (all channels pooled). [B, th, tw]."""
+    b, c, hp, wp = corr.shape
+    th, tw = hp // t, wp // t
+    v = corr.abs().reshape(b, c, th, t, tw, t).permute(0, 2, 4, 1, 3, 5).reshape(b, th, tw, c * t * t)
+    k = max(1, int(round(q * v.shape[-1])))
+    return v.kthvalue(k, dim=-1).values  # no element-count limit, unlike torch.quantile
+
+
+def _tile_lattice_p2p(d: torch.Tensor, t: int) -> torch.Tensor:
+    """Phase-locked 2px lattice per tile: peak-to-peak of the four sublattice
+    means inside each t x t tile, max over channels. [B, th, tw], 0..1 units."""
+    b, c, hp, wp = d.shape
+    th, tw = hp // t, wp // t
+    m = d.reshape(b, c, th, t // 2, 2, tw, t // 2, 2).mean(dim=(3, 6))  # [B, C, th, 2, tw, 2]
+    m = m.permute(0, 1, 2, 4, 3, 5).reshape(b, c, th, tw, 4)
+    return (m.amax(-1) - m.amin(-1)).amax(1)
+
+
+def auto_limit_map(
+    corr: torch.Tensor,
+    threshold: float = NEGLIGIBLE_AMP,
+    tile: int = AUTO_TILE,
+    floor: float = 0.004,
+    ceil: float = 0.05,
+    mult: float = 3.0,
+    ratio: float = AUTO_LADDER_RATIO,
+    target_fraction: float = AUTO_TARGET_FRACTION,
+):
+    """Per-pixel clamp limit: auto_limit_targeted() run per tile, then blended.
+
+    Each tile gets its own percentile guess and its own ladder, so a flat sky
+    settles near the floor while textured ground climbs to the ceiling, and the
+    tile limits are bilinearly interpolated from tile centres to pixels so the
+    clamp has no seams. Images smaller than one tile fall back to one global
+    limit. Returns (limit_map [B, 1, H, W], tile_limits [B, th, tw]).
+    """
+    b, c, h, w = corr.shape
+    t = max(2, int(tile) // 2 * 2)
+    if t < 8 or h < t or w < t:
+        lim = auto_limit_targeted(corr, threshold, floor, ceil, mult, ratio, target_fraction)
+        return lim.view(b, 1, 1, 1).expand(b, 1, h, w), lim.view(b, 1, 1)
+    padded = _pad_to_multiple(corr, t)
+    target = float(threshold) * float(target_fraction)
+    cand = (_tile_quantile_abs(padded, t) * mult).clamp(floor, ceil)  # [B, th, tw]
+    chosen = cand.clone()
+    done = torch.zeros_like(cand, dtype=torch.bool)
+    while True:
+        lim_px = cand.repeat_interleave(t, 1).repeat_interleave(t, 2).unsqueeze(1)  # block-constant [B, 1, Hp, Wp]
+        resid = _tile_lattice_p2p(padded - padded.clamp(min=-lim_px, max=lim_px), t)
+        chosen = torch.where(done, chosen, cand)
+        done = done | (resid <= target)
+        if bool((done | (cand >= ceil)).all()):  # every entry is satisfied or has nowhere left to go
+            break
+        cand = torch.where(done, cand, (cand * ratio).clamp(max=ceil))
+    # Blend for seamless clamping, but never below a tile's own calibrated limit:
+    # the ramp from a strong tile runs outward into its neighbours, so the residual
+    # target still holds inside every tile.
+    blocks = chosen.repeat_interleave(t, 1).repeat_interleave(t, 2).unsqueeze(1)
+    smooth = F.interpolate(chosen.unsqueeze(1), size=padded.shape[-2:], mode="bilinear", align_corners=False)
+    lim_map = torch.maximum(smooth, blocks)
+    return lim_map[:, :, :h, :w], chosen
 
 
 def zoom_center(x: torch.Tensor, factor: int) -> torch.Tensor:
@@ -174,6 +253,7 @@ def degrid(
     grid_view: str = "full frame",
     skip_when_clean: bool = True,
     threshold: float = NEGLIGIBLE_AMP,
+    tile: int = AUTO_TILE,
 ):
     """Run the notch filter on an image batch.
 
@@ -190,9 +270,10 @@ def degrid(
     threshold: lattice amplitude (0..1 units) below which an image counts as
     clean. Defaults to NEGLIGIBLE_AMP (0.5/255).
 
-    In "auto" mode the clamp limit is raised per image until the lattice left
-    behind is under half of `threshold` (see auto_limit_targeted); "manual"
-    uses `limit` as given.
+    In "auto" mode the clamp limit is calibrated per `tile` x `tile` pixels
+    and raised there until the lattice left behind is under half of
+    `threshold`, then blended into a smooth per-pixel map (see
+    auto_limit_map); "manual" uses `limit` everywhere as given.
 
     Returns (cleaned, grid_vis, stats): cleaned matches the input shape and
     dtype; grid_vis is the removed component amplified and centered on 0.5
@@ -202,7 +283,10 @@ def degrid(
                   for diagnostics only; it is NOT a grid measure
       checker_255 / vstripe_255 / hstripe_255  the lattice broken into its
                   checkerboard and two stripe components
-      limit       clamp limit actually applied (auto or manual)
+      limit       clamp limit applied: the manual value, or in auto mode the
+                  median tile limit
+      limit_min / limit_max   range of the tile limits in auto mode (equal to
+                  limit in manual mode)
       clipped_pct percent of pixels where the correction hit the clamp
                   (those are real edges being protected)
       residual_255 phase-locked lattice left in the cleaned image, /255 units;
@@ -222,13 +306,17 @@ def degrid(
     texture = torch.quantile(flat, 0.75, dim=1)  # [B]
 
     if mode == "auto":
-        lim = auto_limit_targeted(corr, threshold=threshold)  # [B]
+        lim_map, tile_lims = auto_limit_map(corr, threshold=threshold, tile=tile)  # [B, 1, H, W], [B, th, tw]
+        lim = tile_lims.reshape(x.shape[0], -1).median(dim=1).values  # [B] representative: median tile limit
+        lim_min = tile_lims.reshape(x.shape[0], -1).amin(dim=1)
+        lim_max = tile_lims.reshape(x.shape[0], -1).amax(dim=1)
     else:
         lim = torch.full((x.shape[0],), float(limit), dtype=corr.dtype, device=corr.device)
-    lim_b = lim.view(-1, 1, 1, 1)
-    clipped = (corr.abs() > lim_b).float().mean(dim=(1, 2, 3)) * 100.0  # [B] %
+        lim_map = lim.view(-1, 1, 1, 1)
+        lim_min = lim_max = lim
+    clipped = (corr.abs() > lim_map).float().mean(dim=(1, 2, 3)) * 100.0  # [B] %
     corr_raw = corr
-    corr = corr.clamp(-lim_b, lim_b)
+    corr = corr.clamp(min=-lim_map, max=lim_map)
     # Lattice left in the cleaned image = lattice(x) - lattice(corr): the
     # sublattice means are linear, and extract_grid has unit response at the
     # three 2px frequencies, so measuring the unremoved part is exact.
@@ -264,6 +352,8 @@ def degrid(
             "vstripe_255": vst[i].item() * 255.0,
             "hstripe_255": hst[i].item() * 255.0,
             "limit": lim[i].item(),
+            "limit_min": lim_min[i].item(),
+            "limit_max": lim_max[i].item(),
             "clipped_pct": clipped[i].item(),
             "residual_255": residual[i].item() * 255.0,
             "skipped": bool(skipped[i].item()) and skip_when_clean,
@@ -295,10 +385,12 @@ def status_line(mode: str, stats: list, threshold: float = NEGLIGIBLE_AMP) -> st
         )
         kind = max(parts, key=lambda p: p[1])[0]
         residual = s.get("residual_255", 0.0)
+        lo, hi = s.get("limit_min", lim), s.get("limit_max", lim)
+        lim_txt = f"{lim:.3f}" if abs(hi - lo) < 5e-4 else f"{lo:.3f}-{hi:.3f}"
         if residual >= float(threshold) * 255.0:
-            verdict = f"grid {amp:.2f}/255 ({kind}) — partially removed, {residual:.2f}/255 left (limit {lim:.3f} {src} too low)"
+            verdict = f"grid {amp:.2f}/255 ({kind}) — partially removed, {residual:.2f}/255 left (limit {lim_txt} {src} too low)"
         else:
-            verdict = f"grid {amp:.2f}/255 ({kind}) — removed (limit {lim:.3f} {src})"
+            verdict = f"grid {amp:.2f}/255 ({kind}) — removed (limit {lim_txt} {src})"
     # no colon in the line: Forge JSON-quotes any infotext value containing one
     line = f"{verdict} · edges protected {s['clipped_pct']:.1f}%"
     if len(stats) > 1:

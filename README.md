@@ -71,7 +71,7 @@ and search for **degrid**.
 | Widget | Default | What it does |
 |---|---|---|
 | `enabled` | on | Off = the image passes through completely untouched. Flip it for a quick A/B comparison. |
-| `mode` | `auto` | **auto (recommended):** measures the grid strength per image and sets the removal limit itself — nothing to tune, adapts to different VAEs and content. Starts from a robust guess and raises the limit, in 1.5× steps up to 0.05, until the lattice left in the image is under half the `threshold`. **manual:** uses the `limit` widget instead. Only switch if auto visibly under- or over-corrects. |
+| `mode` | `auto` | **auto (recommended):** measures the grid strength and sets the removal limit itself — nothing to tune, adapts to different VAEs and content. Calibrated per 256px tile: each tile starts from a robust guess and raises its limit, in 1.5× steps up to 0.05, until the lattice left there is under half the `threshold`; the tile limits are blended into a smooth per-pixel map. A flat sky stays near 0.005 while textured ground climbs to 0.05, so regions with little grid are not clamped as hard as the regions that need it. **manual:** uses the `limit` widget everywhere instead. Only switch if auto visibly under- or over-corrects. |
 | `limit` | 0.02 | **Manual mode only** (ignored in auto). Maximum per-pixel correction on the 0–1 scale. The VAE grid is usually 0.005–0.02. Too low → grid partially survives in contrasty areas. Too high → fine 2–3px texture (skin pores, fabric weave) gets slightly softened. |
 | `skip_when_clean` | on | Leave the image completely untouched when no grid is actually there. The node measures the lattice directly, so anything that has already been through an upscaler or a resize is passed through **bit-for-bit**. Turn it off only to force the filter to run regardless. |
 | `grid_gain` | 10 | Brightness amplification of the `removed_grid` preview **only** — never affects the cleaned image. Raise it if the preview looks like flat gray. |
@@ -98,7 +98,9 @@ After each run the node shows what it measured:
   while genuine detail cancels. That matters, because "how much high-frequency
   content is in this image" is not the same question as "is there a grid", and
   answering the first one gets it backwards on a busy image.
-- **`limit N (auto|manual)`** — the correction cap that was applied.
+- **`limit N (auto|manual)`** — the correction cap that was applied. In auto
+  mode this is a range, e.g. `limit 0.010-0.050 auto`: the lowest and highest
+  tile limits in the image.
 - **`partially removed, X/255 left`** — the cap was lower than the grid's own
   amplitude, so part of the lattice survived. The node measures what is left
   in the cleaned image rather than assuming the notch got it all. Raise the
@@ -332,15 +334,26 @@ without banding.
 
 The correction is then amplitude-clamped before subtraction, so strong real
 edges and legitimate fine texture pass through unsoftened — only the
-low-amplitude artifact band is removed. In `auto` mode the clamp limit starts
-from a robust percentile of the extracted grid component and is then raised,
-per image, until the lattice that would survive the clamp is under half the
-clean threshold (or the 0.05 ceiling is reached). The survivor is measured
-exactly, without a second filter pass: the sublattice means are linear, so the
-lattice left in the cleaned image equals the lattice in the part of the
-correction the clamp cut off. Krea 2 decodes settle at the first or second
-step; Qwen Image 2.1 decodes carry a heavier tail in the notch band and need
-0.03–0.05, where the percentile guess alone left a third of the grid behind.
+low-amplitude artifact band is removed. In `auto` mode the clamp limit is a
+smooth per-pixel map. The image is split into 256px tiles; in each, the limit
+starts from a robust percentile of the extracted grid component and is raised
+until the lattice that would survive the clamp there is under half the clean
+threshold (or the 0.05 ceiling is reached), and the tile limits are then
+bilinearly blended so the clamp has no seams. The survivor is measured exactly,
+without a second filter pass: the sublattice means are linear, so the lattice
+left in the cleaned image equals the lattice in the part of the correction the
+clamp cut off.
+
+Per-tile calibration matters because the grid is not uniform: it rides on
+texture. On a Qwen Image 2.1 desert scene it measured 0.7/255 in the sky and
+8.8/255 on the ground, and the tile map settles at 0.005–0.007 over the sky
+and 0.05 over the ground, where one frame-wide limit had been 0.05 everywhere.
+What the map cannot do is separate detail from a grid that sits on that same
+detail: the dry twigs carry a 3/255 lattice themselves, so their tiles keep a
+high cap and lose the same few percent of 2px-band energy either way. The
+protection is for the regions that do not need the high cap. Krea 2 decodes
+settle at the first or second step; Qwen Image 2.1 decodes carry a heavier
+tail in the notch band and their textured tiles climb to 0.03–0.05.
 
 Separately from the clamp, the node decides *whether there is a grid at all* by
 measuring the phase-locked lattice (see **Status line** above). Measured across
@@ -387,10 +400,16 @@ and per-image auto-calibration.
 - **Auto mode now targets the residual.** On Qwen Image 2.1 decodes the
   percentile-based limit (0.009) capped nearly a tenth of the pixels and left
   0.7/255 of a 1.9/255 grid in place; the status line said so, and now auto
-  acts on it. The limit is raised per image, in 1.5× steps up to 0.05, until
-  the lattice left behind is under half the clean threshold. Krea 2 results
-  move by at most one step; the exact per-image limit is still reported in the
-  status line and `stats["limit"]`.
+  acts on it. The limit is raised in 1.5× steps up to 0.05 until the lattice
+  left behind is under half the clean threshold. Krea 2 results move by at
+  most one step.
+- **Auto mode is local.** The calibration runs per 256px tile and the tile
+  limits are blended into a per-pixel map (never below a tile's own value),
+  because the grid rides on texture: 0.7/255 in a Qwen 2.1 sky, 8.8/255 on the
+  ground of the same image, and one frame-wide limit high enough for the
+  ground applied the same 0.05 cap to the sky. The status line reports the
+  range of tile limits; `stats` gain `limit_min` and `limit_max`. Manual mode
+  is unchanged.
 
 ### 2026-09-20
 

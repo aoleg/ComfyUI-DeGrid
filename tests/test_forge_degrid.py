@@ -121,6 +121,48 @@ class CoreTests(unittest.TestCase):
         self.assertAlmostEqual(st_both[0]["limit"], chosen, places=6)
         self.assertAlmostEqual(st_both[1]["limit"], st_easy[0]["limit"], places=6)
 
+    def test_local_limits_follow_the_grid(self):
+        # 512x512, tiles of 128: a faint grid plus fine random texture everywhere,
+        # and a strong grid in the top quarter. Local calibration should keep the
+        # faint region near the floor and only raise the top tiles.
+        h, w = 512, 512
+        base = stubs.smooth_image(h, w, seed=11)
+        # sparse bright specks: real high-amplitude 2px-band detail, the kind a
+        # low clamp protects and a high clamp shaves
+        g = torch.Generator().manual_seed(5)
+        texture = (torch.rand(1, 1, h, w, generator=g) < 0.01).float().expand(1, 3, h, w) * 0.2
+        img = stubs.add_lattice((base + texture).clamp(0, 1), 0.6, 0.6)
+        strong = stubs.add_lattice((base + texture).clamp(0, 1), 3.0, 3.0)  # within reach of the 0.05 ceiling even on a speck
+        img[:, :, : h // 4, :] = strong[:, :, : h // 4, :]
+        x = img.permute(0, 2, 3, 1)
+        corr = core.extract_grid(img)
+        lim_map, tiles = core.auto_limit_map(corr, tile=128)
+        self.assertEqual(tuple(lim_map.shape), (1, 1, h, w))
+        self.assertEqual(tuple(tiles.shape), (1, 4, 4))
+        self.assertGreater(tiles[0, 0].min().item(), tiles[0, 1:].max().item() * 1.5)  # top row raised, rest not
+        self.assertLess(tiles[0, 1:].max().item(), 0.03)
+        cleaned, _, st = core.degrid(x, mode="auto", tile=128)
+        self.assertLess(st[0]["limit_min"], st[0]["limit_max"])
+        self.assertLess(st[0]["residual_255"], 0.25 + 1e-6)
+        self.assertLess(lattice_255(cleaned[:, h // 4 :]), 0.3)  # faint region clean too
+        self.assertIn("-", core.status_line("auto", st).split("(limit ")[1].split(" ")[0])  # range shown
+        # at the specks in the faint region, the local cap shaves far less than one
+        # frame-wide ceiling limit would (the faint grid itself is removed by both)
+        wide, _, _ = core.degrid(x, mode="manual", limit=0.05)
+        specks = texture[0, 0, h // 4 :] > 0
+        loss_local = (cleaned - x)[0, h // 4 :][specks].abs().mean().item()
+        loss_wide = (wide - x)[0, h // 4 :][specks].abs().mean().item()
+        self.assertLess(loss_local, loss_wide * 0.5)
+        # small images fall back to one global limit; tiny ones do not crash
+        _, _, st_small = core.degrid(x[:, :96, :96], mode="auto")
+        self.assertAlmostEqual(st_small[0]["limit_min"], st_small[0]["limit_max"], places=7)
+        core.degrid(x[:, :6, :6], mode="auto")
+        # batch of two: maps are independent
+        both = torch.cat([x, stubs.add_lattice(base).permute(0, 2, 3, 1)], dim=0)
+        _, _, st_both = core.degrid(both, mode="auto", tile=128)
+        self.assertAlmostEqual(st_both[0]["limit_max"], st[0]["limit_max"], places=6)
+        self.assertLess(st_both[1]["limit_max"], st[0]["limit_max"])
+
     def test_residual_reports_what_the_clamp_left(self):
         x = stubs.add_lattice(stubs.smooth_image(H, W)).permute(0, 2, 3, 1)
         cleaned, _, st = core.degrid(x, mode="manual", limit=0.001)
