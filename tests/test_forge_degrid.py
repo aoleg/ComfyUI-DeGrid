@@ -76,6 +76,19 @@ class CoreTests(unittest.TestCase):
         self.assertIn("partially removed, 1.66/255 left (limit 0.001 manual too low)", line)
         self.assertNotIn(":", line)
 
+    def test_rgba_filters_colour_and_passes_alpha_through(self):
+        rgb = stubs.add_lattice(stubs.smooth_image(H, W))  # [1, 3, H, W]
+        alpha = stubs.add_lattice(stubs.smooth_image(H, W, c=1, seed=7), 2.0, 2.0)  # gridded alpha, must survive
+        rgba = torch.cat([rgb, alpha], dim=1).permute(0, 2, 3, 1)
+        cleaned, vis, st = core.degrid(rgba, grid_view="full frame")
+        self.assertEqual(tuple(cleaned.shape), (1, H, W, 4))
+        self.assertTrue(torch.equal(cleaned[..., 3], rgba[..., 3]))
+        self.assertLess(lattice_255(cleaned[..., :3]), 0.3)
+        self.assertTrue(torch.all(vis[..., 3] == 1.0))
+        # the alpha lattice must not leak into the measurement
+        _, _, st_rgb = core.degrid(rgba[..., :3])
+        self.assertAlmostEqual(st[0]["amp_255"], st_rgb[0]["amp_255"], places=5)
+
     def test_residual_reports_what_the_clamp_left(self):
         x = stubs.add_lattice(stubs.smooth_image(H, W)).permute(0, 2, 3, 1)
         cleaned, _, st = core.degrid(x, mode="manual", limit=0.001)

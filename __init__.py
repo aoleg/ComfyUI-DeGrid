@@ -4,11 +4,21 @@ import torch
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io, ui
 
-from .degrid_core import degrid, status_line
+from .degrid_core import NEGLIGIBLE_AMP, degrid, status_line
+
+DEFAULT_THRESHOLD_255 = round(NEGLIGIBLE_AMP * 255.0, 2)  # 0.5
 
 
-def _status_line(mode: str, stats: list) -> str:
-    return status_line(mode, stats)
+def _status_line(mode: str, stats: list, threshold_255: float = DEFAULT_THRESHOLD_255) -> str:
+    return status_line(mode, stats, threshold=threshold_255 / 255.0)
+
+
+def _console(line: str) -> None:
+    """One line per run in the backend log (SwarmUI users only see the node text there)."""
+    try:
+        print(f"[DeGrid] {line}")
+    except UnicodeEncodeError:
+        print("[DeGrid] " + line.encode("ascii", "replace").decode("ascii"))
 
 
 class VAEDeGrid(io.ComfyNode):
@@ -84,6 +94,15 @@ class VAEDeGrid(io.ComfyNode):
                             "a magnified center crop where the actual 2px lattice is "
                             "visible. Preview only; the cleaned image is never cropped.",
                 ),
+                io.Float.Input(
+                    "threshold", default=DEFAULT_THRESHOLD_255, min=0.05, max=5.0, step=0.05,
+                    optional=True,
+                    tooltip="Lattice amplitude, in /255 units, below which an image counts "
+                            "as clean (see the status line's 'grid X/255'). Native Qwen-VAE "
+                            "decodes measure about 0.5-2.5, images that went through an "
+                            "upscaler or a resize about 0.1-0.2. Lower it (0.3) if a model "
+                            "you know is gridded reports 'none detected'.",
+                ),
             ],
             outputs=[
                 io.Image.Output(
@@ -104,17 +123,20 @@ class VAEDeGrid(io.ComfyNode):
 
     @classmethod
     def execute(cls, image, enabled, mode, limit, grid_gain, grid_view,
-                skip_when_clean=True):
+                skip_when_clean=True, threshold=DEFAULT_THRESHOLD_255):
         if not enabled:
             return io.NodeOutput(
                 image, torch.full_like(image, 0.5),
                 ui=ui.PreviewText("bypassed (enabled = off)"),
             )
+        threshold = float(threshold) if threshold is not None else DEFAULT_THRESHOLD_255
         cleaned, vis, stats = degrid(
             image, mode=mode, limit=limit, grid_gain=grid_gain, grid_view=grid_view,
-            skip_when_clean=skip_when_clean,
+            skip_when_clean=skip_when_clean, threshold=threshold / 255.0,
         )
-        return io.NodeOutput(cleaned, vis, ui=ui.PreviewText(_status_line(mode, stats)))
+        line = _status_line(mode, stats, threshold)
+        _console(line)
+        return io.NodeOutput(cleaned, vis, ui=ui.PreviewText(line))
 
 
 class DeGridExtension(ComfyExtension):

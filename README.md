@@ -20,9 +20,9 @@ One repo, one set of maths (`degrid_core.py`), several hosts:
 |---|---|---|
 | ComfyUI | `__init__.py` at the repo root (node **VAE DeGrid (Nyquist Notch)**) | shipped |
 | Forge Neo | `scripts/degrid_forge.py` + `lib_degrid/` (accordion **VAE DeGrid**) | shipped, see [Forge Neo](#forge-neo) |
-| SwarmUI | planned | — |
+| SwarmUI | `DeGridExtension.cs` + `assets/` (parameter group **VAE DeGrid**) | shipped, see [SwarmUI](#swarmui) |
 
-Cloning the repo into either host's extension folder is enough; each host only
+Cloning the repo into a host's extension folder is enough; each host only
 loads its own entry point and ignores the others.
 
 ## Install (ComfyUI)
@@ -76,6 +76,11 @@ and search for **degrid**.
 | `skip_when_clean` | on | Leave the image completely untouched when no grid is actually there. The node measures the lattice directly, so anything that has already been through an upscaler or a resize is passed through **bit-for-bit**. Turn it off only to force the filter to run regardless. |
 | `grid_gain` | 10 | Brightness amplification of the `removed_grid` preview **only** — never affects the cleaned image. Raise it if the preview looks like flat gray. |
 | `grid_view` | `4x zoom` | Framing of the `removed_grid` preview. `full frame` shows the whole image (reads as gray noise at preview size — see below). `4x zoom` / `8x zoom` show a magnified center crop where the actual 2px lattice is visible. Preview only; the cleaned image is never cropped. |
+| `threshold` | 0.5 | Optional. Lattice amplitude in /255 units below which an image counts as clean and is passed through. Native Qwen-VAE decodes measure 0.5–2.5, resized or upscaled images 0.1–0.2. Lower it (0.3) if a model you know is gridded reports `none detected`. |
+
+RGBA images (the Qwen Image 2.1 VAE decodes to four channels) are filtered on
+their colour channels only; alpha is passed through untouched and takes no part
+in the measurement.
 
 ### Status line
 
@@ -259,6 +264,63 @@ few milliseconds and covers every decode path; the upscale decoder is a full
 decode at four times the pixel count, but also gives real 2x output when that
 is what you want.
 
+## SwarmUI
+
+SwarmUI's backend is a real ComfyUI, so this side of the repo does not
+reimplement anything: a small C# extension installs this repo's own node pack
+on the backend and wires the **VAE DeGrid** node into the generated workflow.
+
+### Install
+
+Clone into SwarmUI's `src/Extensions` folder and restart (or run the update
+script):
+
+```
+cd <SwarmUI>/src/Extensions
+git clone https://github.com/aoleg/ComfyUI-DeGrid
+```
+
+Then, in the generate tab, open the **VAE DeGrid** parameter group (advanced
+parameters must be on) and click **Install VAE DeGrid**. That clones this same
+repo into the backend's `DLNodes` folder as the ComfyUI node pack and restarts
+the backend. The node and the extension are therefore always the same commit.
+
+### Use
+
+Tick the **VAE DeGrid** group. Its four parameters are the node's: **Mode**,
+**Limit** (manual mode), **Skip When Clean** and **Clean Threshold** (/255). The
+settings are written into the image metadata as `degrid`.
+
+Where the node goes in the workflow:
+
+- **After the final VAE decode**, before segmentation, video steps and SeedVR,
+  which is the order the ComfyUI section above asks for. Output from a Pixel
+  Decoder model or from Neo-VAE-Utils' upscaling decoder also arrives here and
+  is measured like anything else: the former is skipped as clean, the latter has
+  its own 2px lattice removed.
+- **After the refiner's decode when the refiner upscales in pixel space**
+  (upscale method `pixel-*` or `model-*`), so the upscaler, the intermediate
+  save and the re-encode all see a degridded image. Latent-space refiner
+  upscales never decode, so there is nothing to do there.
+
+Video outputs are left alone in this version. The backend log shows one
+`[DeGrid] grid ...` line per node run; SwarmUI does not display node text, so
+that line is where the measurement is.
+
+### Notes
+
+- **Version check.** ComfyUI silently ignores inputs a node does not declare. On
+  every backend refresh the extension compares the installed node's inputs with
+  the ones it sends and logs a warning naming anything missing, for example a
+  `DLNodes` clone that predates the `threshold` input, or a `VAEDeGrid` node
+  supplied by [ComfyUI-SaveSimple](https://github.com/lunaaispace-eng/ComfyUI-SaveSimple)
+  instead of this repo.
+- **Two clones of this repo are expected.** One under `src/Extensions` (the C#
+  extension), one under the backend's `DLNodes` (the node pack). SwarmUI compiles
+  the `DLNodes` copy of the `.cs` file into its core assembly as well, so the
+  extension is prepped twice at startup; a process-wide guard makes the second
+  init a no-op. Two `Prepping extension` lines in the log are normal.
+
 ## How it works
 
 A separable Nyquist notch: 9-tap alternating-sign binomial kernel
@@ -308,6 +370,14 @@ and per-image auto-calibration.
   degridding (see [Swapping the decoder instead](#swapping-the-decoder-instead)):
   gridded at 2x, clean after its own downscale to 1x; the lattice comes from
   the decoder, not the latent.
+- **SwarmUI extension.** `DeGridExtension.cs` at the repo root, see
+  [SwarmUI](#swarmui): the node is inserted after the final decode and after a
+  pixel-space refiner decode, with a version check against the installed node.
+- **Node: optional `threshold` input** (/255, default 0.5), the control Forge
+  already had, so all three hosts share one parameter surface. The node also
+  prints its status line to the backend console.
+- **RGBA decodes** (Qwen Image 2.1) are filtered on colour only; alpha passes
+  through untouched and is excluded from the measurement.
 
 ### 2026-09-20
 

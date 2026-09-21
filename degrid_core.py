@@ -125,7 +125,8 @@ def degrid(
 ):
     """Run the notch filter on an image batch.
 
-    image: [B, H, W, C] in 0..1.
+    image: [B, H, W, C] in 0..1. C > 3 (RGBA) is treated as colour plus
+    passthrough channels: only the first three are measured and filtered.
     grid_view: "full frame", "4x zoom" or "8x zoom" — framing of the
     removed-grid visualization (zoom = magnified center crop so the 2px
     lattice is visible in a node preview).
@@ -154,7 +155,10 @@ def degrid(
       skipped     True if the image was passed through untouched as clean
     """
     orig_dtype = image.dtype
-    x = image.permute(0, 3, 1, 2).contiguous().float()
+    x_all = image.permute(0, 3, 1, 2).contiguous().float()
+    # Colour only: an RGBA decode (Qwen Image 2.1) keeps its alpha plane untouched,
+    # and alpha takes no part in the measurement or the calibration either.
+    x, extra = (x_all[:, :3], x_all[:, 3:]) if x_all.shape[1] > 3 else (x_all, None)
     corr = extract_grid(x)
 
     amp, chk, vst, hst = lattice_amp(corr)  # each [B]
@@ -185,6 +189,9 @@ def degrid(
 
     cleaned = (x - corr).clamp(0.0, 1.0)
     vis = (corr * float(grid_gain) + 0.5).clamp(0.0, 1.0)
+    if extra is not None:
+        cleaned = torch.cat([cleaned, extra], dim=1)
+        vis = torch.cat([vis, torch.ones_like(extra)], dim=1)  # opaque preview
     cleaned = cleaned.permute(0, 2, 3, 1).contiguous().to(orig_dtype)
     vis = vis.permute(0, 2, 3, 1).contiguous().to(orig_dtype)
 
