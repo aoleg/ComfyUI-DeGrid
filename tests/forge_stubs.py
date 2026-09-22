@@ -24,6 +24,10 @@ class Component:
         self.value = kwargs.get("value")
         self.label = kwargs.get("label")
         self.choices = kwargs.get("choices")
+        self.clicks = []
+
+    def click(self, fn=None, **kwargs):
+        self.clicks.append((fn, kwargs))
 
 
 class Container(Component):
@@ -36,10 +40,11 @@ class Container(Component):
 
 def fake_gradio() -> types.ModuleType:
     gr = types.ModuleType("gradio")
-    for name in ("HTML", "Markdown", "Checkbox", "Slider", "Radio", "Dropdown"):
+    for name in ("HTML", "Markdown", "Checkbox", "Slider", "Radio", "Dropdown", "Button"):
         setattr(gr, name, Component)
     for name in ("Row", "Column", "Group", "Accordion"):
         setattr(gr, name, Container)
+    gr.update = lambda **kwargs: dict(kwargs)
     return gr
 
 
@@ -59,17 +64,29 @@ def fake_forge_modules(extension_root: str) -> dict[str, types.ModuleType]:
         def ui(self, is_img2img):
             return []
 
+        def process(self, p, *args, **kwargs):
+            pass
+
         def process_before_every_sampling(self, p, *args, **kwargs):
             pass
 
         def postprocess_batch(self, p, *args, **kwargs):
             pass
 
+        def postprocess_image_after_composite(self, p, pp, *args):
+            pass
+
         def postprocess(self, p, processed, *args):
             pass
 
+    class PostprocessImageArgs:
+        def __init__(self, image, index):
+            self.image = image
+            self.index = index
+
     scripts_mod.Script = Script
     scripts_mod.AlwaysVisible = object()
+    scripts_mod.PostprocessImageArgs = PostprocessImageArgs
 
     ui_components_mod = types.ModuleType("modules.ui_components")
 
@@ -78,6 +95,19 @@ def fake_forge_modules(extension_root: str) -> dict[str, types.ModuleType]:
             super().__init__(value=value, label=label)
 
     ui_components_mod.InputAccordion = InputAccordion
+    ui_components_mod.ToolButton = Component
+
+    ui_mod = types.ModuleType("modules.ui")
+    ui_mod.refresh_symbol = "R"
+
+    sd_vae_mod = types.ModuleType("modules.sd_vae")
+    sd_vae_mod.vae_dict = {}
+    sd_vae_mod.refresh_calls = 0
+
+    def refresh_vae_list():
+        sd_vae_mod.refresh_calls += 1
+
+    sd_vae_mod.refresh_vae_list = refresh_vae_list
 
     infotext_utils_mod = types.ModuleType("modules.infotext_utils")
 
@@ -104,12 +134,16 @@ def fake_forge_modules(extension_root: str) -> dict[str, types.ModuleType]:
     modules_pkg.ui_components = ui_components_mod
     modules_pkg.infotext_utils = infotext_utils_mod
     modules_pkg.processing = processing_mod
+    modules_pkg.ui = ui_mod
+    modules_pkg.sd_vae = sd_vae_mod
     return {
         "modules": modules_pkg,
         "modules.scripts": scripts_mod,
         "modules.ui_components": ui_components_mod,
         "modules.infotext_utils": infotext_utils_mod,
         "modules.processing": processing_mod,
+        "modules.ui": ui_mod,
+        "modules.sd_vae": sd_vae_mod,
     }
 
 
@@ -212,6 +246,33 @@ class FakeProcessed:
         self.images = []
         self.extra_images = []
         self.infotexts = ["prompt\nSteps: 1"]
+
+
+class FakeFlux2VAE:
+    """An *identity* codec with the Flux.2 VAE's interface and geometry: 16px
+    stride, [B, H, W, C] in and out. encode = pixel-unshuffle by 16 (so the
+    latent grid is H/16 x W/16), decode = pixel-shuffle back. Any latent-space
+    extrapolation therefore decodes to exactly the same operation in pixel
+    space, which makes the enhancement maths testable to float precision."""
+
+    latent_channels = 128  # what describe_codec() looks at; the fake's real channel count is 768
+    downscale_ratio = 16
+
+    def __init__(self, device: str = "cpu"):
+        self.device = torch.device(device)
+        self.encode_calls = 0
+        self.decode_calls = 0
+        self.first_stage_model = None
+
+    def encode(self, pixels):  # [B, H, W, C] -> [B, C*256, H/16, W/16]
+        self.encode_calls += 1
+        x = pixels.movedim(-1, 1).float()
+        assert x.shape[-2] % 16 == 0 and x.shape[-1] % 16 == 0, tuple(x.shape)
+        return torch.nn.functional.pixel_unshuffle(x, 16)
+
+    def decode(self, latent):
+        self.decode_calls += 1
+        return torch.nn.functional.pixel_shuffle(latent.float(), 16).movedim(1, -1)
 
 
 # -- synthetic images ------------------------------------------------------------

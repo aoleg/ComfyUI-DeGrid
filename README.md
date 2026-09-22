@@ -22,6 +22,17 @@ One repo, one set of maths (`degrid_core.py`), several hosts:
 | Forge Neo | `scripts/degrid_forge.py` + `lib_degrid/` (accordion **VAE DeGrid**) | shipped, see [Forge Neo](#forge-neo) |
 | SwarmUI | `DeGridExtension.cs` + `assets/` (parameter group **VAE DeGrid**) | shipped, see [SwarmUI](#swarmui) |
 
+A second, optional tool lives in the same repo: **VAE Enhance**, which re-draws
+fine texture (skin pores, fur, hair) by pushing the finished image through a
+Flux.2 VAE. Same maths file for every host (`vae_enhance_core.py`), see
+[VAE Enhance](#vae-enhance-flux2-round-trip).
+
+| Host | Where it lives | Status |
+|---|---|---|
+| ComfyUI | node **VAE Enhance (Flux.2 round trip)** in `__init__.py` | shipped |
+| Forge Neo | `scripts/vae_enhance_forge.py` + `lib_degrid/flux2_vae.py` (accordion **VAE Enhance (Flux.2 round trip)**) | shipped |
+| SwarmUI | — | not yet |
+
 Cloning the repo into a host's extension folder is enough; each host only
 loads its own entry point and ignores the others.
 
@@ -33,7 +44,9 @@ git clone https://github.com/lunaaispace-eng/ComfyUI-DeGrid
 ```
 
 No dependencies beyond torch (no OpenGL/GLFW — works headless). Restart ComfyUI
-and search for **degrid**.
+and search for **degrid**. The notch needs nothing else; the optional
+[VAE Enhance](#vae-enhance-flux2-round-trip) node needs a Flux.2 VAE file
+(`flux2-vae.safetensors`, 336 MB) in `models/vae`.
 
 > **Do not install this alongside [ComfyUI-SaveSimple](https://github.com/lunaaispace-eng/ComfyUI-SaveSimple).**
 > That pack bundles the same node under the same id (`VAEDeGrid`), so having both
@@ -266,6 +279,130 @@ few milliseconds and covers every decode path; the upscale decoder is a full
 decode at four times the pixel count, but also gives real 2x output when that
 is what you want.
 
+A Flux.2 round trip on its own is a worse grid remover than the notch (0.29/255
+left against 0.05, a faint checker of its own, ~34 dB of fidelity everywhere),
+so it is not offered as one. What the Flux.2 encoder *is* good for is the next
+section.
+
+## VAE Enhance (Flux.2 round trip)
+
+An optional second tool for the "plastic skin" complaint. It does not touch the
+grid problem; it uses the grid-free image the notch produces.
+
+**What it does.** Encode the finished image with the Flux.2 VAE, encode a
+1px-blurred copy of it too, and decode the latent pushed *away* from the
+blurred one:
+
+```
+z      = E(x)
+z_blur = E(blur(x))
+out    = D(z + gain · mask · (z − z_blur))
+```
+
+`z − z_blur` is what the encoder considers fine detail, expressed in the
+channel space where sub-8px structure actually lives, and the decoder renders
+the added energy as texture. Measured against a pixel unsharp mask at the same
+high-frequency energy: the unsharp mask adds edge halo and uniform grain, and
+doubles the VAE grid; this adds pores on skin and strands on fur. It is a
+generative-flavoured operation without a diffusion model: two encodes, one
+decode, under a second at 1536px on a modern GPU, 160 MB of VRAM in bf16.
+
+Three things make it usable, all on by default:
+
+- **The notch runs first.** Blurring removes the 2px grid, so `z − z_blur`
+  would otherwise carry the lattice and the extrapolation would draw it back
+  (measured: 0.48/255 re-drawn on a flat wall without it, 0.02 with it). The
+  Forge script and the node both run `degrid` in auto mode on the input; an
+  already clean image passes that step untouched.
+- **A mask.** Per latent pixel (16px block), from the input: a *floor* on local
+  texture drops clean sky, a *target* fades the gain out where a region already
+  carries texture (so textured skin does not become leather), and a *skin-tone*
+  term restricts the gain to skin-coloured regions. The last one is what keeps
+  a portrait's walls and floor untouched: by local energy alone, plastic skin
+  (16px-block median 1.7–2.0/255) is indistinguishable from a flat painted wall
+  (1.5), sand (1.4) or defocused fur (2.0). Colour separates them: cheeks of
+  fair, freckled and dark subjects measure 0.86–1.0 on the YCbCr skin bands,
+  jeans, concrete and a blue wall 0.0–0.1. Brown hair and beige fur pass too,
+  which is fine.
+- **Tone fix.** The decoder shifts hue and shading along with the detail (red
+  down 3–6 levels on skin at gain 0.75–1). The result keeps the input's 17px
+  low-pass and takes only the fine detail from the round trip, which restores
+  colour to a fraction of a level and recovers ~2 dB.
+
+### ComfyUI
+
+Wire **VAE Decode → VAE DeGrid → VAE Enhance → Save**, with a **Load VAE** node
+holding `flux2-vae.safetensors` on the `vae` input. Run it once, on the final
+image, never before an upscaler: the notch has to run on every decode, the
+enhancement only on the last one. The node shows a status line:
+
+```
+texture 4.71 -> 4.98 /255 (+6%) · mask 11% (skin only) · gain 0.5 sigma 1 · input grid 2.73/255 removed first · output grid 0.16/255 · 0.8 s
+```
+
+The `mask` output shows where the gain went (white = full gain), which is the
+first thing to look at when a result is not what you expected.
+
+### Forge Neo
+
+A **VAE Enhance (Flux.2 round trip)** accordion, off by default, next to VAE
+DeGrid. Put `flux2-vae.safetensors` in `models/VAE`; the dropdown lists only
+files whose safetensors header is a Flux.2 VAE (32-channel decoder input and
+the latent batch-norm buffers), by header rather than by name, first one
+pre-selected. It runs once per image after the final decode
+(`postprocess_image_after_composite`), so hires fix and img2img are handled
+without configuration, and writes its settings as `VAE Enhance: vae=…;gain=…`
+and the status line as `VAE Enhance result`. **Show mask** adds the weight map
+to the results. Never select the Flux.2 VAE in the main *VAE / Text Encoder*
+selector: that replaces the checkpoint's VAE and breaks sampling.
+
+### Settings
+
+| Setting | Default | What it does |
+|---|---|---|
+| `gain` | 0.5 | How far past the input to push the detail; 0 is a plain round trip. 0.5 is the only setting that improved or left alone every image in an eight-image test set. Skin and fur improve from 0.5; regular fabric weave (denim, upholstery) moirés from about 0.75; skin turns leathery from about 1. |
+| `sigma` | 1 | Blur radius that defines "fine detail". 1px targets pores and fur; 2 pushes larger structure and brings 16px block artefacts in sooner. |
+| `mask_floor` | 0.5 | Local texture (16px-block std of the 9px high-pass luma, /255) below which a region gets nothing. Block medians on notched Krea 2 decodes: clean sky 0.35, sand 1.4, flat painted wall 1.5, plastic skin 1.2–2, defocused fur 2, textured skin 3–6, fur/hair/fabric 7–16. The default only drops clean sky and keeps every kind of skin; 2.5–3.5 protects walls, sand and defocus, at the cost of plastic skin. 0 = off. |
+| `texture_target` | 9 | Gain fades out linearly as a region approaches this texture level, so skin that already has pores is not pushed further. 0 = off. Turn it off for animals: in-focus fur sits above 9 and would be protected away. |
+| `skin_only` | on | Multiply the mask by the skin-tone membership. Turn it off for animals and greyscale images (the status line then reads `mask 0%`). |
+| `tone_fix` | on | Keep the input's colour and shading. Costs nothing; leave it on. |
+| `degrid_first` (node) | on | Run the notch on the input. The Forge script always does. |
+| `post_notch` | off | Run the notch again on the output. The Flux.2 decoder has a faint 2px checker of its own that grows with gain (0.06/255 at gain 0.5, 0.5 at gain 1 on a flat wall). Costs 2px texture in the enhanced result; only worth it above gain 0.75. |
+
+Presets that worked: **portrait** = defaults; **animal** = `skin_only` off,
+`texture_target` 0, `mask_floor` 3 (protects the wall behind the cat).
+
+### What it cannot do
+
+- It cannot reduce texture. A round trip reproduces an over-textured decode to
+  within 0.03/255 of high-frequency energy, and the extrapolation makes it
+  stronger. For that case use the notch and pixel-space tools.
+- It cannot tell regular fine texture from irregular by energy: denim and a
+  sofa weave moiré from gain 0.75, fur does not. Keep the gain at 0.5 on
+  images with such fabric, or mask them out upstream.
+- It cannot tell defocus from plastic skin by energy either. With `skin_only`
+  off, a defocused skin-coloured region gets faint texture from gain 0.75.
+- Greyscale images get nothing with `skin_only` on.
+
+### Tests
+
+`python -m unittest discover -s tests -v` covers the maths against an identity
+codec with the Flux.2 geometry (so every latent-space step has an exact
+pixel-space equivalent), the mask terms, the Forge hook wiring and parameter
+round trip, and the header-based VAE detection, with no VAE file. The real VAE
+is exercised by
+
+```
+<forge-neo>/venv/Scripts/python.exe tests/live_flux2_check.py [--image some.png] [--gain 0.5] [--skin 0|1]
+```
+
+which builds the Flux.2 VAE from `<forge-neo>/models/VAE` through the Forge
+backend, checks the weights mapped (a plain round trip must reconstruct a
+synthetic image above 30 dB; the file ships in diffusers key naming and loads
+silently onto random weights, 14 dB, if the conversion is skipped), checks the
+texture response and the grid removal, and optionally writes the enhanced
+image and mask for a real file. No checkpoint is needed.
+
 ## SwarmUI
 
 SwarmUI's backend is a real ComfyUI, so this side of the repo does not
@@ -370,6 +507,20 @@ reimplemented in pure PyTorch with a narrower 9-tap kernel, amplitude limiting,
 and per-image auto-calibration.
 
 ## Changelog
+
+### 2026-09-22
+
+- **VAE Enhance.** A second node (**VAE Enhance (Flux.2 round trip)**) and a
+  second Forge Neo accordion, sharing `vae_enhance_core.py`: detail
+  extrapolation through the Flux.2 VAE encoder for plastic skin and soft fur,
+  with the notch run first, a floor / target / skin-tone mask and a tone fix.
+  See [VAE Enhance](#vae-enhance-flux2-round-trip) for the measurements behind
+  the defaults and for what it cannot do. Not wired into SwarmUI yet.
+- `lib_degrid/flux2_vae.py`: Forge-side Flux.2 VAE detection by safetensors
+  header and loading with the diffusers-to-ldm key conversion the official file
+  needs. `lib_degrid/loader.py` gained `load_enhance_core()`.
+- `tests/live_flux2_check.py`: an end-to-end check through the real VAE using
+  a Forge Neo venv (no checkpoint).
 
 ### 2026-09-21
 

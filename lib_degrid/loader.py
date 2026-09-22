@@ -17,19 +17,35 @@ import importlib.util
 import os
 import sys
 
-_MODULE_NAME = "comfyui_degrid_core"
-_cached_module = None
-_cached_stamp = None
+_CORE_FILE = "degrid_core.py"
+_ENHANCE_FILE = "vae_enhance_core.py"
+_MODULE_NAMES = {_CORE_FILE: "comfyui_degrid_core", _ENHANCE_FILE: "comfyui_degrid_enhance_core"}
+_cache: dict[str, tuple[tuple, object]] = {}  # file name -> (stamp, module)
 
 
-def core_stamp(extension_root: str):
-    """Identity of the degrid_core.py currently on disk: (path, mtime_ns, size)."""
-    path = os.path.join(extension_root, "degrid_core.py")
+def core_stamp(extension_root: str, file_name: str = _CORE_FILE):
+    """Identity of a core file currently on disk: (path, mtime_ns, size)."""
+    path = os.path.join(extension_root, file_name)
     try:
         info = os.stat(path)
         return (path, info.st_mtime_ns, info.st_size)
     except OSError:
         return (path, None, None)
+
+
+def _load(extension_root: str, file_name: str):
+    stamp = core_stamp(extension_root, file_name)
+    cached = _cache.get(file_name)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+
+    name = _MODULE_NAMES[file_name]
+    spec = importlib.util.spec_from_file_location(name, stamp[0])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    _cache[file_name] = (stamp, module)
+    return module
 
 
 def load_core(extension_root: str):
@@ -39,17 +55,9 @@ def load_core(extension_root: str):
     script's own import time; ``scripts.basedir()`` reflects whichever script Forge
     is currently loading and is not reliable later, e.g. inside a UI callback.
     """
-    global _cached_module, _cached_stamp
+    return _load(extension_root, _CORE_FILE)
 
-    stamp = core_stamp(extension_root)
-    if _cached_module is not None and _cached_stamp == stamp:
-        return _cached_module
 
-    spec = importlib.util.spec_from_file_location(_MODULE_NAME, stamp[0])
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[_MODULE_NAME] = module
-    spec.loader.exec_module(module)
-
-    _cached_module = module
-    _cached_stamp = stamp
-    return module
+def load_enhance_core(extension_root: str):
+    """Same for vae_enhance_core.py (the detail-extrapolation maths)."""
+    return _load(extension_root, _ENHANCE_FILE)
