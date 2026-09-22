@@ -31,7 +31,7 @@ Flux.2 VAE. Same maths file for every host (`vae_enhance_core.py`), see
 |---|---|---|
 | ComfyUI | node **VAE Enhance (Flux.2 round trip)** in `__init__.py` | shipped |
 | Forge Neo | `scripts/vae_enhance_forge.py` + `lib_degrid/flux2_vae.py` (accordion **VAE Enhance (Flux.2 round trip)**) | shipped |
-| SwarmUI | — | not yet |
+| SwarmUI | same `DeGridExtension.cs` (parameter group **VAE Enhance**) | shipped, see [SwarmUI](#swarmui) |
 
 Cloning the repo into a host's extension folder is enough; each host only
 loads its own entry point and ignores the others.
@@ -446,6 +446,30 @@ Video outputs are left alone in this version. The backend log shows one
 `[DeGrid] grid ...` line per node run; SwarmUI does not display node text, so
 that line is where the measurement is.
 
+### VAE Enhance in SwarmUI
+
+A second parameter group, **VAE Enhance**, served by the same node pack (the
+install button on either group installs it). Put `flux2-vae.safetensors` in
+the VAE models folder, refresh the model list, tick the group and pick the file
+in **[VAE Enhance] Flux.2 VAE**; Flux.2-classed VAEs are listed first. The
+other parameters are the node's (`gain`, `sigma`, mask floor and target, skin
+tones only, keep input colour, notch again after), with the same defaults and
+the same meaning as in the [settings table](#settings).
+
+Where it goes: **once, right after VAE DeGrid on the final decode** (priority
+1.6, after DeGrid's 1.5), never in the refiner path, so an upscaler is never
+fed re-drawn strands and the fidelity cost is paid once. The node runs the
+notch on its input itself, so the grid is removed first whether or not the VAE
+DeGrid group is on; with it on, that inner pass finds a clean image and skips.
+The Flux.2 VAE is loaded through SwarmUI's own VAE loader helper and is used
+only for this round trip; the checkpoint's VAE still decodes the image. The
+settings are written to the image metadata as `vae_enhance`, and the backend
+log shows one `[DeGrid] texture ...` line per image.
+
+If the group is on and no VAE is selected the generation stops with a message
+saying so. A node pack that predates VAE Enhance is reported on backend
+refresh by the same version check that covers the DeGrid node.
+
 ### Notes
 
 - **Version check.** ComfyUI silently ignores inputs a node does not declare. On
@@ -515,7 +539,11 @@ and per-image auto-calibration.
   extrapolation through the Flux.2 VAE encoder for plastic skin and soft fur,
   with the notch run first, a floor / target / skin-tone mask and a tone fix.
   See [VAE Enhance](#vae-enhance-flux2-round-trip) for the measurements behind
-  the defaults and for what it cannot do. Not wired into SwarmUI yet.
+  the defaults and for what it cannot do.
+- **SwarmUI: VAE Enhance group.** `DeGridExtension.cs` registers a second
+  parameter group with a Flux.2 VAE picker and inserts the node after the
+  final-decode DeGrid step (priority 1.6), never in the refiner path; the
+  version check now covers both nodes. See [VAE Enhance in SwarmUI](#vae-enhance-in-swarmui).
 - `lib_degrid/flux2_vae.py`: Forge-side Flux.2 VAE detection by safetensors
   header and loading with the diffusers-to-ldm key conversion the official file
   needs. `lib_degrid/loader.py` gained `load_enhance_core()`.
