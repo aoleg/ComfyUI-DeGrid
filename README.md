@@ -286,75 +286,158 @@ section.
 
 ## VAE Enhance (Flux.2 round trip)
 
-An optional second tool for the "plastic skin" complaint. It does not touch the
-grid problem; it uses the grid-free image the notch produces.
+### Where the idea came from
 
-**What it does.** Encode the finished image with the Flux.2 VAE, encode a
-1px-blurred copy of it too, and decode the latent pushed *away* from the
-blurred one:
+The Qwen Image VAE that Krea 2, Qwen Image and Anima decode through has two
+reputations: it leaves the 2px grid this repo was written to remove, and it
+renders skin as smooth plastic. The Flux.2 VAE has the opposite reputation,
+fine detail and no grid. Since a VAE is just an encoder and a decoder, the
+question was whether a finished image could be pushed *through* the Flux.2 VAE
+as a post-process, encode then decode, and come back with its grid gone and
+its skin texture re-drawn. The first answer, from the literature, was no: a
+round trip is a reconstruction, the decoder reproduces whatever it is given,
+and smooth skin in means smooth skin out. The second answer, from
+experiments, was "not a round trip, but something close to one".
 
-```
-z      = E(x)
-z_blur = E(blur(x))
-out    = D(z + gain · mask · (z − z_blur))
-```
+### What the research showed
 
-`z − z_blur` is what the encoder considers fine detail, expressed in the
-channel space where sub-8px structure actually lives, and the decoder renders
-the added energy as texture. Measured against a pixel unsharp mask at the same
-high-frequency energy: the unsharp mask adds edge halo and uniform grain, and
-doubles the VAE grid; this adds pores on skin and strands on fur. It is a
-generative-flavoured operation without a diffusion model: two encodes, one
-decode, under a second at 1536px on a modern GPU, 160 MB of VRAM in bf16.
+Two measurements settled it. A five-VAE round trip of a real photo
+([sheet](scr/research-five-vae-roundtrip.png): Flux 1, Flux 2, Qwen 1, Qwen 2.1
+and Wan 2.1, eye region at 4x) confirmed that a plain round trip removes the
+grid but re-writes about half of the pore texture with its own version at the
+same energy, so it cannot restore anything that is not already there. It also
+showed that the stock Wan 2.1 decoder has no lattice at all, so the grid is a
+property of the Qwen fine-tune, not of the architecture. The operation that
+does add texture is *extrapolation*: encode the image, encode a slightly
+blurred copy, and decode the latent pushed away from the blurred one. The
+difference between the two latents is what the encoder considers fine detail,
+in the channel space where sub-8px structure actually lives, and the decoder
+renders the added energy as pores and strands rather than as the edge halo and
+uniform grain a pixel unsharp mask produces at the same energy. The first
+ladder on a Krea 2 portrait ([sheet](scr/research-first-ladder.png): original,
+round trip, gains 1 to 3, then the pixel unsharp mask at matched energy) fixed
+the working range: gain 0.5 draws pores, gain 1 tints and etches, gain 2 and
+above turns skin into worms and oil paint. Eight images later the defaults
+below were set, and two more findings shaped the design: the grid must be
+notched *before* the extrapolation, because blurring removes it and the
+difference would otherwise carry it back onto every flat wall, and a fixed
+gain amplifies regular fabric weave into moiré from about 0.75, which is why
+0.5 is the default and not a starting point.
 
-Three things make it usable, all on by default:
+### What we made
 
-- **The notch runs first.** Blurring removes the 2px grid, so `z − z_blur`
-  would otherwise carry the lattice and the extrapolation would draw it back
-  (measured: 0.48/255 re-drawn on a flat wall without it, 0.02 with it). The
-  Forge script and the node both run `degrid` in auto mode on the input; an
-  already clean image passes that step untouched.
-- **A mask.** Per latent pixel (16px block), from the input: a *floor* on local
-  texture drops clean sky, a *target* fades the gain out where a region already
-  carries texture (so textured skin does not become leather), and a *skin-tone*
-  term restricts the gain to skin-coloured regions. The last one is what keeps
-  a portrait's walls and floor untouched: by local energy alone, plastic skin
-  (16px-block median 1.7–2.0/255) is indistinguishable from a flat painted wall
-  (1.5), sand (1.4) or defocused fur (2.0). Colour separates them: cheeks of
-  fair, freckled and dark subjects measure 0.86–1.0 on the YCbCr skin bands,
-  jeans, concrete and a blue wall 0.0–0.1. Brown hair and beige fur pass too,
-  which is fine.
-- **Tone fix.** The decoder shifts hue and shading along with the detail (red
-  down 3–6 levels on skin at gain 0.75–1). The result keeps the input's 17px
-  low-pass and takes only the fine detail from the round trip, which restores
-  colour to a fraction of a level and recovers ~2 dB.
+An optional second tool in the same repo, on all three hosts: a **VAE
+Enhance** node in ComfyUI, a **VAE Enhance (Flux.2 round trip)** accordion in
+Forge Neo, and a **VAE Enhance** parameter group in SwarmUI. In plain terms it
+does this to each finished image, once:
 
-### ComfyUI
+1. Removes the 2px grid with the notch, whether or not VAE DeGrid is on. If
+   DeGrid already ran, this step finds nothing and changes nothing.
+2. Encodes the image and a 1px-blurred copy of it with the Flux.2 VAE.
+3. Builds a mask that says where more texture is wanted: not on clean sky,
+   not where the region already has plenty, and, by default, only where the
+   colour is skin-like. The last rule is what leaves walls and floors alone,
+   because by local texture a plastic cheek and a flat painted wall measure
+   the same and only colour tells them apart.
+4. Decodes the latent pushed away from the blurred one by the gain, through
+   that mask.
+5. Puts the input's own colour and shading back under the new detail, because
+   the Flux.2 decoder shifts skin a few levels toward magenta on its own.
 
-Wire **VAE Decode → VAE DeGrid → VAE Enhance → Save**, with a **Load VAE** node
-holding `flux2-vae.safetensors` on the `vae` input. Run it once, on the final
-image, never before an upscaler: the notch has to run on every decode, the
-enhancement only on the last one. The node shows a status line:
+Two encodes and one decode, under a second at 1536px on a modern GPU, 160 MB
+of VRAM in bf16. The Flux.2 VAE file is the only thing to download.
+
+In Forge Neo the two accordions sit side by side. VAE DeGrid runs inside every
+VAE decode, which is what cleans the hires-fix first pass before the upscaler
+sees it:
+
+![VAE DeGrid accordion in Forge Neo](scr/vae-degrid.png)
+
+VAE Enhance runs once per final image. The dropdown lists only files whose
+safetensors header is a Flux.2 VAE, by header rather than by name, and every
+control has its measured default:
+
+![VAE Enhance accordion in Forge Neo](scr/vae-enhance.png)
+
+Enable both. With only VAE Enhance on, a plain single-pass image comes out the
+same, but a hires-fix upscaler is still fed a gridded first pass. The status
+line in the console and in the image parameters says which case you are in:
+`input grid 2.73/255 removed first` means DeGrid was off, `input grid 0.05/255
+(clean)` means it was on. Never select the Flux.2 VAE in the main *VAE / Text
+Encoder* selector: that replaces the checkpoint's VAE and breaks sampling.
+
+In ComfyUI, wire **VAE Decode → VAE DeGrid → VAE Enhance → Save** with a
+**Load VAE** node holding `flux2-vae.safetensors` on the `vae` input, and use
+it once on the final image, never before an upscaler. The node shows the same
+status line and has a `mask` output, white where the gain went, which is the
+first thing to look at when a result is not what you expected:
 
 ```
 texture 4.71 -> 4.98 /255 (+6%) · mask 11% (skin only) · gain 0.5 sigma 1 · input grid 2.73/255 removed first · output grid 0.16/255 · 0.8 s
 ```
 
-The `mask` output shows where the gain went (white = full gain), which is the
-first thing to look at when a result is not what you expected.
+### What it looks like
 
-### Forge Neo
+Each sheet is a set of native-pixel crops at 2x, from the test corpus.
+Columns, unless labelled otherwise: original decode, notched, then the
+enhancement at gain 0.5, 0.75 and 1 with the colour restored, then a pixel
+unsharp mask at gain 1 for comparison.
 
-A **VAE Enhance (Flux.2 round trip)** accordion, off by default, next to VAE
-DeGrid. Put `flux2-vae.safetensors` in `models/VAE`; the dropdown lists only
-files whose safetensors header is a Flux.2 VAE (32-channel decoder input and
-the latent batch-norm buffers), by header rather than by name, first one
-pre-selected. It runs once per image after the final decode
+**Fur, in-focus head** ([sheet](scr/sheet-fur.png)). Gain 0.5 draws individual
+strands on the cat's head and crisps the whiskers and eyes; gain 1 etches. The
+pixel unsharp mask in the last column sharpens the strands that were there and
+adds nothing.
+
+![fur](scr/sheet-fur.png)
+
+**Dark skin with existing texture** ([sheet](scr/sheet-dark-skin.png)). Gain
+0.5 refines the pores that are already there; from 0.75 the highlights turn
+into orange peel. This is the case the *texture target* is for: the gain fades
+out as a region approaches the target level.
+
+![dark skin](scr/sheet-dark-skin.png)
+
+**Fair skin with freckles** ([sheet](scr/sheet-freckles.png)). The freckles are
+kept at every gain, fine texture appears between them, and at gain 1 the skin
+takes on a cellular look.
+
+![freckles](scr/sheet-freckles.png)
+
+**Why the default is 0.5 and not higher** ([sheet](scr/sheet-gain.png)). The
+same face from a production run at gain 0.5 and 0.75, against the notched
+original. At 0.5 the cheek gets faint pores. At 0.75 the forehead and cheek
+grow a network of fine lines that reads as wrinkles, and the eyebrows pick up
+stray strokes. The mask weight on this face was 0.63, so the two runs applied
+effective gains of about 0.3 and 0.47, and the damage starts between them.
+
+![gain 0.5 versus 0.75](scr/sheet-gain.png)
+
+**A production pair** ([sheet](scr/sheet-production.png)). Columns: raw
+decode, notched, enhanced at the defaults, and the difference between enhanced
+and notched amplified 8x. On the face the difference is pore-scale texture; on
+the printed swimsuit it is confined to the edges of the print, because the
+skin-tone mask is zero there.
+
+![production pair](scr/sheet-production.png)
+
+**What Flux.2 does to film grain** ([sheet](scr/sheet-grain.png)). A sky
+region of a "1950s technicolor, film grain" prompt, with the high-pass
+amplified 6x below: raw decode, notched, and after the enhancement, where the
+mask is zero so this is a pure round trip. The diagonal mesh in the raw grain
+is the 2px lattice, and the notch removes it. The round trip re-renders the
+grain about 10 % stronger and slightly finer and leaves its statistics
+otherwise unchanged. If the grain looks more natural after the enhancement,
+that is the notch's doing.
+
+![grain](scr/sheet-grain.png)
+
+### Forge Neo details
+
+The accordion runs once per image after the final decode
 (`postprocess_image_after_composite`), so hires fix and img2img are handled
-without configuration, and writes its settings as `VAE Enhance: vae=…;gain=…`
-and the status line as `VAE Enhance result`. **Show mask** adds the weight map
-to the results. Never select the Flux.2 VAE in the main *VAE / Text Encoder*
-selector: that replaces the checkpoint's VAE and breaks sampling.
+without configuration. It writes its settings as `VAE Enhance: vae=…;gain=…`
+and the status line as `VAE Enhance result`, both restored by the paste
+button. **Show mask** adds the weight map to the results.
 
 ### Settings
 
