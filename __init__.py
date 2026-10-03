@@ -313,6 +313,15 @@ class FilmGrain(io.ComfyNode):
                             "images (mean chroma under 8/255). off: luma grain only, always. on: colour "
                             "grain even on a faintly tinted frame (it still only varies the tint).",
                 ),
+                io.Boolean.Input(
+                    "match_texture", default=True,
+                    tooltip="Scale the amount down on images that carry little fine texture of their own. "
+                            "Grain reads as natural up to about 2-3x the texture an image already has in "
+                            "its flat midtones and as an overlay on a clean, crisp render. The image's "
+                            "texture floor is measured; below 1.1/255 the amount is reduced in proportion, "
+                            "down to a quarter. Never adds more than the strength asks for. Off = the "
+                            "strength's amount on every image.",
+                ),
                 io.Int.Input(
                     "seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF, control_after_generate=True,
                     tooltip="Grain pattern seed. Each image in a batch uses seed + its index.",
@@ -322,11 +331,11 @@ class FilmGrain(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, image, enabled, iso, strength, colour_grain, seed):
+    def execute(cls, image, enabled, iso, strength, colour_grain, match_texture, seed):
         if not enabled:
             return io.NodeOutput(image, ui=ui.PreviewText("bypassed (enabled = off)"))
         t0 = time.perf_counter()
-        out, stats = grain_core.add_grain(image, iso=iso, strength=float(strength), seed=int(seed), chroma=colour_grain)
+        out, stats = grain_core.add_grain(image, iso=iso, strength=float(strength), seed=int(seed), chroma=colour_grain, match_texture=bool(match_texture))
         line = grain_core.status_line(stats, seconds=time.perf_counter() - t0)
         _console(line)
         return io.NodeOutput(out, ui=ui.PreviewText(line))

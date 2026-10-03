@@ -541,8 +541,19 @@ Two controls, deliberately independent:
   3.3/255, which is the just-noticeable difference in midtones, so it reads as
   texture rather than noise; 100 is 8/255, a bit noisy. The model's own
   prompted grain measures 4/255, about strength 60.
+- **Match image texture** (on by default) scales that amount down on images
+  that carry little fine texture of their own. Grain reads as natural when it
+  is up to about two or three times the texture an image already has in its
+  flat midtones, and as an overlay sitting on a clean surface at five times.
+  The same strength-50 grain looked right on a soft 1024 px render of a prompt
+  and wrong on a crisp 1536 px render of the same prompt, whose flat areas
+  carry a third of the texture. The stage measures that texture floor, the
+  quietest tenth of the midtone areas of the frame, and below 1.1/255 reduces
+  the amount in proportion, down to a quarter. It never adds more than the
+  strength asks for, so already-grainy and textured images get the full
+  amount. Turn it off to get exactly the strength's amount on every image.
 
-| ISO | blob sigma at 1536 px | neighbour correlation | kurtosis | colour grain |
+| ISO | blob sigma at a 1536 px long side | neighbour correlation | kurtosis | colour grain |
 |---|---|---|---|---|
 | 100 | 0.40 px | 0.15 | 3.1 | 5 % |
 | 200 (default) | 0.50 px | 0.35 | 3.2 | 8 % |
@@ -551,9 +562,12 @@ Two controls, deliberately independent:
 | 1600 | 0.95 px | 0.74 | 3.9 | 25 % |
 | 3200 | 1.20 px | 0.80 | 4.3 | 35 % |
 
-The blob size scales with the image's long side, because grain lives on the
-frame and not on the pixel, so a 2048 px output does not look finer than a
-1024 px one.
+The blob size grows with the square root of the image's long side: a 1024 px
+image gets 0.82 times the table's size, a 2048 px one 1.15 times. Scaling it in
+full proportion, as film grain on a print would, made the same preset look one
+step coarser at 1536 than at 1024 when viewed at 100 percent, which is how
+grain is judged; not scaling at all would make a large image's grain vanish in
+a fit-to-screen view. The square root splits the difference.
 
 **Colour.** Luma grain is the same value added to R, G and B, so a grey pixel
 stays grey exactly. Colour grain is a multiplicative fluctuation of the colour
@@ -572,15 +586,19 @@ grain into blobs twice the size or averages it away. In ComfyUI, wire the
 you use them. In Forge Neo the **Film grain** accordion runs on each final
 image after the other two accordions and never on the hires-fix first pass,
 and does not need either of them to be on; it writes `Film grain:
-iso=ISO200;strength=50;chroma=auto` and a `Film grain result` line to the
-parameters. In SwarmUI the **Film Grain** group is inserted after the other two
+iso=ISO200;strength=50;chroma=auto;match=1` and a `Film grain result` line to
+the parameters. In SwarmUI the **Film Grain** group is inserted after the other two
 steps on the final decode. On every host the status line reports the applied
-amplitude, the measured midtone amplitude, the blob size, the colour decision
-and the seed:
+amplitude, the measured midtone amplitude, the texture match, the blob size,
+the colour decision and the seed. On a crisp 1536 px render:
 
 ```
-grain ISO 200 strength 50 · 3.3/255 midtone (measured 3.0) · blob 0.56 px · colour grain 8% · seed 42 · 0.03 s
+grain ISO 200 strength 50 · 1.3/255 midtone (measured 1.3) · x0.41 for texture floor 0.45/255 · blob 0.53 px · monochrome (luma grain only) · seed 42 · 0.04 s
 ```
+
+On a render that already carries texture, the factor is 1 and the amount is
+the strength's: `3.3/255 midtone (measured 3.0) · x1.00 for texture floor
+1.23/255`.
 
 Judge the result at 100 percent. A downscaled preview hides grain and a 2:1
 view exaggerates every preset.
@@ -665,7 +683,8 @@ refresh by the same version check that covers the DeGrid node.
 ### Film Grain in SwarmUI
 
 A third parameter group, **Film Grain**, on the same node pack: **ISO**,
-**Strength** and **Colour Grain**, with the meaning and defaults of the
+**Strength**, **Colour Grain** and **Match Image Texture**, with the meaning
+and defaults of the
 [Film grain](#film-grain) section. It is inserted after VAE DeGrid and VAE
 Enhance on the final decode, never in the refiner path, and does not need
 either of the other groups to be on. The seed is the generation's seed. The
@@ -734,6 +753,22 @@ reimplemented in pure PyTorch with a narrower 9-tap kernel, amplitude limiting,
 and per-image auto-calibration.
 
 ## Changelog
+
+### 2026-10-04
+
+- **Film grain: match image texture** (new control, on by default). The
+  amount is scaled down on images whose flat midtones carry little fine
+  texture of their own, measured per image; strength-50 grain that read as
+  natural on a soft 1024 px render read as an overlay on a crisp 1536 px render
+  of the same prompt, with a third of the texture. Never more than the
+  strength asks for. See [Film grain](#film-grain).
+- **Film grain: gentler size scaling.** The blob size now grows with the
+  square root of the image's long side instead of in proportion, so a preset
+  looks the same at 100 percent across sizes (1536 against 1024: 1.22 times
+  instead of 1.5).
+- **Film grain: status line without commas.** "monochrome, luma grain only"
+  made Forge write the whole `Film grain result` value in quotes; it now
+  reads "monochrome (luma grain only)".
 
 ### 2026-10-03
 

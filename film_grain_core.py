@@ -16,14 +16,25 @@ colour channels of a finished image. Two controls, deliberately orthogonal:
 * ``strength`` 0..100 sets the *amplitude* alone, in /255 units of midtone
   luma: 0.3 at 1 (under the midtone just-noticeable difference of ~3/255),
   3.3 at 50 (at threshold: reads as texture, not noise), 8 at 100 (grainy).
+* ``match_texture`` (default on) scales that amplitude down on images whose own
+  fine texture is low. Grain reads as natural when it is up to ~2-3x the
+  texture an image already carries in its flat midtones and as an overlay on
+  a clean surface at 5x; the same strength-50 grain looked right on a soft
+  1024 px render (texture floor 1.2/255) and wrong on a crisp 1536 px render of
+  the same prompt (floor 0.45/255). The factor is floor / 1.1, clamped to
+  0.25..1: never more grain than the strength asks for, never less than a
+  quarter of it.
 
 Why it looks like film and not like sensor noise:
 
 * **Correlated.** White noise has zero neighbour correlation; grain clumps
   span 1-3 px. A Gaussian-blurred field at the preset sigma, renormalised,
-  gives a lag-one autocorrelation of ~0.3-0.6 and reads as grain. The sigma is
-  scaled with the image's long side (reference 1536 px) because grain lives on
-  the frame, not on the pixel.
+  gives a lag-one autocorrelation of ~0.3-0.6 and reads as grain. The sigma
+  grows with the *square root* of the image's long side (reference 1536 px).
+  Fully frame-anchored scaling made the same preset 1.5x coarser at 1536 than
+  at 1024 when viewed at 1:1, which is how grain is judged; fully
+  pixel-anchored scaling would make a large image's grain vanish in a
+  fit-to-screen view. The square root splits the difference.
 * **Midtone-weighted.** Grain is strongest in midtones and fades toward black
   and, faster, toward white, which is also where the eye's threshold is
   highest. The weight is a bell in luma, 1 at its peak.
@@ -71,6 +82,15 @@ ISO_PRESETS: dict[str, dict[str, float]] = {
     "ISO 3200": {"sigma": 1.20, "tail": 0.040, "chroma": 0.35},
 }
 SCALE_REF = 1536  # px long side at which the preset sigmas apply
+SIGMA_SCALE_EXP = 0.5  # sigma ~ (long side / SCALE_REF) ** this; 1 = frame-anchored, 0 = pixel-anchored
+# match_texture: the texture floor is the 10th percentile, over 64 px blocks whose mean
+# luminance weight is > 0.5 (blocks where grain would actually show), of the std of the
+# 9 px box high-pass of luma. Calibrated 2026-10-04 on the corpus (knowledge_degrid.md §8.15):
+# strength-50 grain read right at floors 1.06-1.2 and wrong at 0.45.
+FLOOR_REF_255 = 1.1
+FLOOR_FACTOR_MIN = 0.25
+FLOOR_BLOCK = 64
+FLOOR_PERCENTILE = 10.0
 AMP_MIN_255, AMP_MAX_255, AMP_GAMMA = 0.3, 8.0, 1.35
 CHROMA_REF_255 = 40.0  # saturation at which the colour grain's std equals chroma * luma amplitude
 MONO_THRESHOLD_255 = 8.0  # frame mean chroma magnitude below this = monochrome (a Krea 2 "B&W" decode carries ~5.6 of tint; colour photos 20+)
@@ -130,7 +150,30 @@ def luminance_weight(L: torch.Tensor) -> torch.Tensor:
 
 
 def blob_sigma(iso: str, height: int, width: int, scale_ref: int = SCALE_REF) -> float:
-    return ISO_PRESETS[iso]["sigma"] * max(height, width) / float(scale_ref)
+    return ISO_PRESETS[iso]["sigma"] * (max(height, width) / float(scale_ref)) ** SIGMA_SCALE_EXP
+
+
+def texture_floor_255(x_bchw: torch.Tensor) -> float:
+    """The fine texture an image already carries in its flat midtones, /255 (see FLOOR_* above)."""
+    L = luma(x_bchw[:1])
+    hp = (L - box(L, 9)) * 255.0
+    w = luminance_weight(L)
+    h, wd = hp.shape[-2:]
+    block = FLOOR_BLOCK if min(h, wd) >= 2 * FLOOR_BLOCK else max(8, min(h, wd) // 4)
+    hb, wb = h // block, wd // block
+    if hb == 0 or wb == 0:
+        return float(hp.std())
+    def tiles(t):
+        return t[:, :, : hb * block, : wb * block].reshape(hb, block, wb, block).permute(0, 2, 1, 3).reshape(hb * wb, -1)
+    std = tiles(hp).std(dim=1)
+    keep = tiles(w).mean(dim=1) > 0.5
+    v = std[keep] if int(keep.sum()) >= 8 else std
+    return float(torch.quantile(v.float(), FLOOR_PERCENTILE / 100.0))
+
+
+def texture_factor(floor_255: float) -> float:
+    """Amplitude multiplier for match_texture: floor / FLOOR_REF_255, clamped to FLOOR_FACTOR_MIN..1."""
+    return float(min(1.0, max(FLOOR_FACTOR_MIN, floor_255 / FLOOR_REF_255)))
 
 
 def _unit(n: torch.Tensor) -> torch.Tensor:
@@ -181,14 +224,15 @@ def add_grain(
     strength: float = STRENGTH_DEFAULT,
     seed: int = 0,
     chroma: str = "auto",
+    match_texture: bool = True,
     scale_ref: int = SCALE_REF,
     work_device: torch.device | str | None = None,
 ) -> tuple[torch.Tensor, list[dict[str, Any]]]:
     """Add film grain to an image batch.
 
     image: ``[B, H, W, C]`` float 0..1, C >= 3; channels beyond three pass through.
-    Each image in the batch uses ``seed + index``. Returns ``(out, stats)``, one
-    stats dict per image.
+    Each image in the batch uses ``seed + index`` and, with ``match_texture``, its
+    own texture floor. Returns ``(out, stats)``, one stats dict per image.
     """
     if image.ndim != 4 or image.shape[-1] < 3:
         raise ValueError(f"expected [B, H, W, C>=3], got {tuple(image.shape)}")
@@ -202,7 +246,7 @@ def add_grain(
     x_all = image.to(dev).float().permute(0, 3, 1, 2).contiguous()
     x, extra = (x_all[:, :3], x_all[:, 3:]) if x_all.shape[1] > 3 else (x_all, None)
     b, _, h, w = x.shape
-    amp = strength_to_amp(strength) / 255.0
+    nominal = strength_to_amp(strength) / 255.0
     sigma = blob_sigma(iso, h, w, scale_ref)
 
     outs, stats = [], []
@@ -210,6 +254,9 @@ def add_grain(
         xi = x[i : i + 1]
         L, cv, mag = chroma_parts(xi)
         mono, mean_chroma_255 = is_monochrome(xi)
+        floor_255 = texture_floor_255(xi) if match_texture else None
+        factor = texture_factor(floor_255) if match_texture else 1.0
+        amp = nominal * factor
         if chroma == "off":
             chroma_mode, chroma_frac = "off", 0.0
         elif chroma == "on":
@@ -240,6 +287,10 @@ def add_grain(
                 "iso": iso,
                 "strength": float(strength),
                 "amp_255": amp * 255.0,
+                "nominal_255": nominal * 255.0,
+                "match_texture": bool(match_texture),
+                "floor_255": floor_255,
+                "texture_factor": factor,
                 "sigma_px": sigma,
                 "seed": int(seed) + i,
                 "chroma_mode": chroma_mode,
@@ -259,10 +310,11 @@ def add_grain(
 
 
 def status_line(stats: list, seconds: float | None = None) -> str:
-    """One-line verdict shared by the front ends. No colons (Forge quotes them)."""
+    """One-line verdict shared by the front ends. No colons or commas: Forge JSON-quotes
+    any infotext value containing either."""
     s = stats[0]
     chroma_txt = {
-        "monochrome": "monochrome, luma grain only",
+        "monochrome": "monochrome (luma grain only)",
         "off": "colour grain off",
         "on": f"colour grain {s['chroma_frac'] * 100:.0f}%",
         "auto": f"colour grain {s['chroma_frac'] * 100:.0f}%",
@@ -270,6 +322,10 @@ def status_line(stats: list, seconds: float | None = None) -> str:
     parts = [
         f"grain {s['iso']} strength {s['strength']:g}",
         f"{s['amp_255']:.1f}/255 midtone (measured {s['midtone_std_255']:.1f})",
+    ]
+    if s.get("match_texture"):
+        parts.append(f"x{s['texture_factor']:.2f} for texture floor {s['floor_255']:.2f}/255")
+    parts += [
         f"blob {s['sigma_px']:.2f} px",
         chroma_txt,
         f"seed {s['seed']}",

@@ -37,7 +37,7 @@ public class DeGridExtension : Extension
     /// <summary>The third node of the same pack: film grain, the last thing that touches the final image.</summary>
     public const string GrainNodeId = "FilmGrain";
 
-    public static string[] RequiredGrainNodeInputs = ["image", "enabled", "iso", "strength", "colour_grain", "seed"];
+    public static string[] RequiredGrainNodeInputs = ["image", "enabled", "iso", "strength", "colour_grain", "match_texture", "seed"];
 
     public static readonly string[] GrainIsoNames = ["ISO 100", "ISO 200", "ISO 400", "ISO 800", "ISO 1600", "ISO 3200"];
 
@@ -68,6 +68,8 @@ public class DeGridExtension : Extension
     public static T2IRegisteredParam<string> GrainIso, GrainChroma;
 
     public static T2IRegisteredParam<double> GrainStrength;
+
+    public static T2IRegisteredParam<bool> GrainMatchTexture;
 
     static bool ClaimInit()
     {
@@ -160,6 +162,9 @@ public class DeGridExtension : Extension
         GrainChroma = T2IParamTypes.Register<string>(new("[Film Grain] Colour Grain", "[Film Grain]\nauto: colour grain on saturated colours of colour images, none on monochrome images. off: luma grain only, always. on: colour grain even on a faintly tinted frame (it still only varies the tint).",
             "auto", Group: GrainGroup, FeatureFlag: FeatureId, OrderPriority: 3, IsAdvanced: true,
             GetValues: (_) => ["auto", "on", "off"]
+            ));
+        GrainMatchTexture = T2IParamTypes.Register<bool>(new("[Film Grain] Match Image Texture", "[Film Grain]\nScale the amount down on images that carry little fine texture of their own. Grain reads as natural up to about 2-3x the texture an image already has in its flat midtones, and as an overlay on a clean, crisp render.\nThe image's texture floor is measured; below 1.1/255 the amount is reduced in proportion, down to a quarter. Never adds more than the strength asks for. Off = the strength's amount on every image.",
+            "true", Group: GrainGroup, FeatureFlag: FeatureId, OrderPriority: 4
             ));
         // Refiner region ends at -4 and the core final decode ("8") runs at 1. DeGrid at 1.5, Enhance after it, grain last.
         WorkflowGenerator.AddStep(ApplyToRefinerDecode, -3.9);
@@ -377,6 +382,7 @@ public class DeGridExtension : Extension
         }
         string chroma = g.UserInput.Get(GrainChroma, "auto");
         double strength = g.UserInput.Get(GrainStrength, 50);
+        bool match = g.UserInput.Get(GrainMatchTexture, true);
         long seed = g.UserInput.Get(T2IParamTypes.Seed, 0);
         string node = g.CreateNode(GrainNodeId, new JObject()
         {
@@ -385,10 +391,11 @@ public class DeGridExtension : Extension
             ["iso"] = iso,
             ["strength"] = strength,
             ["colour_grain"] = chroma,
+            ["match_texture"] = match,
             ["seed"] = seed
         });
         g.CurrentMedia = g.CurrentMedia.WithPath([node, 0]);
-        g.UserInput.ExtraMeta["film_grain"] = $"iso={iso.Replace(" ", "")};strength={strength};chroma={chroma};seed={seed}";
+        g.UserInput.ExtraMeta["film_grain"] = $"iso={iso.Replace(" ", "")};strength={strength};chroma={chroma};match={(match ? 1 : 0)};seed={seed}";
     }
 
     /// <summary>The refiner step (-4) decodes to the reserved node "24" when it upscales in pixel space, saves an
