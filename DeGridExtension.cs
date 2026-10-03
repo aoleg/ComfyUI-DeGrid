@@ -34,6 +34,13 @@ public class DeGridExtension : Extension
 
     public static string[] RequiredEnhanceNodeInputs = ["image", "vae", "enabled", "gain", "sigma", "mask_floor", "texture_target", "skin_only", "tone_fix", "degrid_first", "post_notch"];
 
+    /// <summary>The third node of the same pack: film grain, the last thing that touches the final image.</summary>
+    public const string GrainNodeId = "FilmGrain";
+
+    public static string[] RequiredGrainNodeInputs = ["image", "enabled", "iso", "strength", "colour_grain", "seed"];
+
+    public static readonly string[] GrainIsoNames = ["ISO 100", "ISO 200", "ISO 400", "ISO 800", "ISO 1600", "ISO 3200"];
+
     /// <summary>Process-wide init claim. The feature install clones this repo into DLNodes/, and SwarmUI's compile
     /// glob does not exclude DLNodes, so this file is compiled twice: once into the core assembly from that clone and
     /// once into the extension assembly from src/Extensions/. Both copies get OnInit(). They are different types in
@@ -55,6 +62,12 @@ public class DeGridExtension : Extension
     public static T2IRegisteredParam<double> EnhanceGain, EnhanceSigma, EnhanceFloor, EnhanceTarget;
 
     public static T2IRegisteredParam<bool> EnhanceSkinOnly, EnhanceToneFix, EnhancePostNotch;
+
+    public static T2IParamGroup GrainGroup;
+
+    public static T2IRegisteredParam<string> GrainIso, GrainChroma;
+
+    public static T2IRegisteredParam<double> GrainStrength;
 
     static bool ClaimInit()
     {
@@ -80,6 +93,7 @@ public class DeGridExtension : Extension
         InstallableFeatures.RegisterInstallableFeature(new("VAE DeGrid", FeatureId, RepoUrl, "aoleg", $"This will install the ComfyUI-DeGrid node pack from {RepoUrl} (Apache-2.0).\nIt must be the same repo this extension came from, so the node and the extension stay in step.\nDo you wish to install?"));
         ComfyUIBackendExtension.NodeToFeatureMap[NodeId] = FeatureId;
         ComfyUIBackendExtension.NodeToFeatureMap[EnhanceNodeId] = FeatureId;
+        ComfyUIBackendExtension.NodeToFeatureMap[GrainNodeId] = FeatureId;
         if (!ClaimInit())
         {
             Logs.Debug("[DeGrid] DeGridExtension.OnInit() ran again (second copy compiled from the DLNodes clone); skipping duplicate registration.");
@@ -133,10 +147,25 @@ public class DeGridExtension : Extension
         EnhancePostNotch = T2IParamTypes.Register<bool>(new("[VAE Enhance] Notch Again After", "[VAE Enhance]\nRun the grid notch again on the output. The Flux.2 decoder has a faint 2px checker of its own that grows with gain; costs 2px texture in the enhanced result. Only worth it above gain 0.75.",
             "false", Group: EnhanceGroup, FeatureFlag: FeatureId, OrderPriority: 8, IsAdvanced: true
             ));
-        // Refiner region ends at -4 and the core final decode ("8") runs at 1. DeGrid at 1.5, Enhance right after it.
+        GrainGroup = new("Film Grain", Toggles: true, Open: false, IsAdvanced: true,
+            Description: "Adds film grain to the final image as the very last step: a seeded, spatially correlated, midtone-weighted noise field.\nISO sets the grain's character (blob size, clumpiness, colour), never its amount; ISO 200 matches the grain Krea 2 draws itself when prompted for it. Strength sets the amount alone: 1 is invisible, 50 reads as texture rather than noise, 100 is a bit noisy.\nGrey stays exactly grey; colour grain never adds a hue and is off on monochrome images. Judge the result at 100%. Needs the same ComfyUI-DeGrid node pack as VAE DeGrid.");
+        GrainIso = T2IParamTypes.Register<string>(new("[Film Grain] ISO", "[Film Grain]\nGrain character, not amount. ISO 100 is near-white and blends into skin as fine texture; ISO 200 (default) is the model's own grain; ISO 400 and up are larger, clumpier blobs that sit on the image like film at that speed, with more colour grain on saturated colours.",
+            "ISO 200", Group: GrainGroup, FeatureFlag: FeatureId, OrderPriority: 1,
+            GetValues: (_) => [.. GrainIsoNames]
+            ));
+        GrainStrength = T2IParamTypes.Register<double>(new("[Film Grain] Strength", "[Film Grain]\nMidtone amplitude: 1 = 0.3/255 (invisible), 50 = 3.3/255 (at the eye's midtone threshold: texture, not noise), 100 = 8/255 (grainy). Highlights and shadows get less.",
+            "50", Min: 0, Max: 100, Step: 1, Group: GrainGroup, FeatureFlag: FeatureId, OrderPriority: 2,
+            Examples: ["25", "50", "75"]
+            ));
+        GrainChroma = T2IParamTypes.Register<string>(new("[Film Grain] Colour Grain", "[Film Grain]\nauto: colour grain on saturated colours of colour images, none on monochrome images. off: luma grain only, always. on: colour grain even on a faintly tinted frame (it still only varies the tint).",
+            "auto", Group: GrainGroup, FeatureFlag: FeatureId, OrderPriority: 3, IsAdvanced: true,
+            GetValues: (_) => ["auto", "on", "off"]
+            ));
+        // Refiner region ends at -4 and the core final decode ("8") runs at 1. DeGrid at 1.5, Enhance after it, grain last.
         WorkflowGenerator.AddStep(ApplyToRefinerDecode, -3.9);
         WorkflowGenerator.AddStep(ApplyToFinalDecode, 1.5);
         WorkflowGenerator.AddStep(ApplyEnhanceToFinalDecode, 1.6);
+        WorkflowGenerator.AddStep(ApplyGrainToFinalDecode, 1.7);
     }
 
     /// <summary>Flux.2-classed VAEs first, then everything else, so the right file is at the top of the list and a
@@ -164,7 +193,12 @@ public class DeGridExtension : Extension
         {
             Logs.Warning($"[DeGrid] The installed node pack has '{NodeId}' but not '{EnhanceNodeId}': it predates VAE Enhance. Update the node pack in DLNodes (git remote {RepoUrl}) to use the VAE Enhance group.");
         }
+        if (rawObjectInfo[NodeId] is JObject && rawObjectInfo[GrainNodeId] is null)
+        {
+            Logs.Warning($"[DeGrid] The installed node pack has '{NodeId}' but not '{GrainNodeId}': it predates Film Grain. Update the node pack in DLNodes (git remote {RepoUrl}) to use the Film Grain group.");
+        }
         CheckNodeInputs(rawObjectInfo, EnhanceNodeId, RequiredEnhanceNodeInputs);
+        CheckNodeInputs(rawObjectInfo, GrainNodeId, RequiredGrainNodeInputs);
     }
 
     static void CheckNodeInputs(JObject rawObjectInfo, string nodeId, string[] required)
@@ -306,6 +340,55 @@ public class DeGridExtension : Extension
         });
         g.CurrentMedia = g.CurrentMedia.WithPath([node, 0]);
         g.UserInput.ExtraMeta["vae_enhance"] = EnhanceMetaString(g, vae);
+    }
+
+    /// <summary>True when the Film Grain group toggle is on. Throws if the backend lacks the node pack.</summary>
+    static bool IsGrainEnabled(WorkflowGenerator g)
+    {
+        if (!g.UserInput.TryGet(GrainStrength, out _))
+        {
+            return false;
+        }
+        if (!g.Features.Contains(FeatureId))
+        {
+            throw new SwarmUserErrorException("Film Grain parameters specified, but the ComfyUI-DeGrid node pack isn't installed on the backend.");
+        }
+        return true;
+    }
+
+    /// <summary>Last of the three (1.7): once, on the final image, after DeGrid (1.5) and Enhance (1.6). Grain added
+    /// before a resize or an upscaler is resampled into blobs, so nothing may run on the pixels after this. The seed
+    /// is the image's own generation seed, so a batch gets different grain per image and a re-run gives the same.</summary>
+    public static void ApplyGrainToFinalDecode(WorkflowGenerator g)
+    {
+        if (!IsGrainEnabled(g))
+        {
+            return;
+        }
+        if (g.CurrentMedia.DataType != WGNodeData.DT_IMAGE)
+        {
+            Logs.Debug($"[DeGrid] Film Grain: final media is {g.CurrentMedia.DataType}, not an image; skipped.");
+            return;
+        }
+        string iso = g.UserInput.Get(GrainIso, "ISO 200");
+        if (!GrainIsoNames.Contains(iso))
+        {
+            iso = "ISO 200";
+        }
+        string chroma = g.UserInput.Get(GrainChroma, "auto");
+        double strength = g.UserInput.Get(GrainStrength, 50);
+        long seed = g.UserInput.Get(T2IParamTypes.Seed, 0);
+        string node = g.CreateNode(GrainNodeId, new JObject()
+        {
+            ["image"] = g.CurrentMedia.Path,
+            ["enabled"] = true,
+            ["iso"] = iso,
+            ["strength"] = strength,
+            ["colour_grain"] = chroma,
+            ["seed"] = seed
+        });
+        g.CurrentMedia = g.CurrentMedia.WithPath([node, 0]);
+        g.UserInput.ExtraMeta["film_grain"] = $"iso={iso.Replace(" ", "")};strength={strength};chroma={chroma};seed={seed}";
     }
 
     /// <summary>The refiner step (-4) decodes to the reserved node "24" when it upscales in pixel space, saves an

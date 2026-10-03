@@ -144,11 +144,30 @@ class NodeSchemaTests(unittest.TestCase):
         self.assertIn("untested VAE", out.ui["text"])
         self.assertNotIn("input grid", out.ui["text"])  # degrid_first off
 
-    def test_extension_lists_both_nodes(self):
+    def test_film_grain_schema_and_execute(self):
+        schema = self.check(node_pkg.FilmGrain, "FilmGrain")
+        self.assertEqual([o.id for o in schema.outputs], ["grained"])
+        defaults = {i.id: i.kwargs.get("default") for i in schema.inputs}
+        self.assertEqual(defaults["iso"], node_pkg.grain_core.ISO_DEFAULT)
+        self.assertEqual(defaults["strength"], node_pkg.grain_core.STRENGTH_DEFAULT)
+        self.assertEqual(defaults["colour_grain"], "auto")
+        seed = next(i for i in schema.inputs if i.id == "seed")
+        self.assertTrue(seed.kwargs.get("control_after_generate"))
+        img = torch.full((1, 96, 128, 3), 0.38)
+        out = node_pkg.FilmGrain.execute(image=img, enabled=True, iso="ISO 200", strength=50.0, colour_grain="auto", seed=3)
+        self.assertEqual(tuple(out.args[0].shape), tuple(img.shape))
+        self.assertIn("grain ISO 200 strength 50", out.ui["text"])
+        self.assertIn("seed 3", out.ui["text"])
+        expected, _ = node_pkg.grain_core.add_grain(img, "ISO 200", 50, seed=3)
+        self.assertTrue(torch.equal(out.args[0], expected))
+        out = node_pkg.FilmGrain.execute(image=img, enabled=False, iso="ISO 200", strength=50.0, colour_grain="auto", seed=3)
+        self.assertIs(out.args[0], img)
+
+    def test_extension_lists_all_nodes(self):
         import asyncio
 
         nodes = asyncio.run(node_pkg.DeGridExtension().get_node_list())
-        self.assertEqual([n.__name__ for n in nodes], ["VAEDeGrid", "VAEEnhance"])
+        self.assertEqual([n.__name__ for n in nodes], ["VAEDeGrid", "VAEEnhance", "FilmGrain"])
 
 
 if __name__ == "__main__":

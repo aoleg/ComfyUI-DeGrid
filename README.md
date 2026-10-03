@@ -33,6 +33,15 @@ Flux.2 VAE. Same maths file for every host (`vae_enhance_core.py`), see
 | Forge Neo | `scripts/vae_enhance_forge.py` + `lib_degrid/flux2_vae.py` (accordion **VAE Enhance (Flux.2 round trip)**) | shipped |
 | SwarmUI | same `DeGridExtension.cs` (parameter group **VAE Enhance**) | shipped, see [SwarmUI](#swarmui) |
 
+A third, also optional: **Film Grain**, the last stage before saving
+(`film_grain_core.py`), see [Film grain](#film-grain).
+
+| Host | Where it lives | Status |
+|---|---|---|
+| ComfyUI | node **Film Grain** in `__init__.py` | shipped |
+| Forge Neo | `scripts/film_grain_forge.py` (accordion **Film grain**) | shipped |
+| SwarmUI | same `DeGridExtension.cs` (parameter group **Film Grain**) | shipped, see [SwarmUI](#swarmui) |
+
 Cloning the repo into a host's extension folder is enough; each host only
 loads its own entry point and ignores the others.
 
@@ -486,6 +495,106 @@ silently onto random weights, 14 dB, if the conversion is skipped), checks the
 texture response and the grid removal, and optionally writes the enhanced
 image and mask for a real file. No checkpoint is needed.
 
+## Film grain
+
+An optional last stage, off by default, that adds film grain to each final
+image. Not an artefact fix: a small amount of correlated noise makes a smooth
+decode read as more detailed, which is the opposite of the plastic look the
+other two tools fight, and which the model only produces when prompted for it.
+
+### What it looks like
+
+The smooth-skin shot at 1:1, which is how grain should be judged: notched,
+then ISO 100, 200 and 400 at strength 50, the same amplitude on all three.
+ISO 200 is the default.
+
+![film grain presets at strength 50](scr/sheet-film-grain.png)
+
+The 1950s black-and-white decode at the same settings, with ISO 400 at 25 and
+100 as well. It is detected as monochrome and gets no colour grain; the added
+grain is identical on all three channels to the last bit.
+
+![film grain on a monochrome image](scr/sheet-film-grain-bw.png)
+
+### What it does
+
+A seeded noise field, blurred to the grain's blob size, clumped a little for
+the faster presets, weighted by luminance so midtones get the most and
+highlights and deep shadows almost none, and added to the colour channels.
+The seed is the image's own generation seed, so a batch gets different grain
+per image and a re-run gives the same.
+
+Two controls, deliberately independent:
+
+- **ISO** sets the grain's *character* and never its amount: blob size, how
+  clumpy it is, and how much colour grain a colour image gets. ISO 100 is
+  near-white noise that blends into skin as fine texture; ISO 200 is the grain
+  Krea 2 draws itself when prompted for film grain (measured: the same
+  neighbour correlation, 0.35 against 0.34); ISO 400 and up are larger,
+  clumpier blobs that sit on the image the way fast film does, with more
+  colour grain on saturated colours. At equal strength the presets differ in
+  kind, not in loudness: a contrast-sensitivity model puts the visibility
+  difference between ISO 100 and 400 at 13 percent, which is not what the eye
+  sees. It sees fine texture versus objects on the skin.
+- **Strength** 0 to 100 sets the midtone amplitude alone, in the same units on
+  every image and at every ISO: 1 is 0.3/255, under the eye's threshold; 50 is
+  3.3/255, which is the just-noticeable difference in midtones, so it reads as
+  texture rather than noise; 100 is 8/255, a bit noisy. The model's own
+  prompted grain measures 4/255, about strength 60.
+
+| ISO | blob sigma at 1536 px | neighbour correlation | kurtosis | colour grain |
+|---|---|---|---|---|
+| 100 | 0.40 px | 0.15 | 3.1 | 5 % |
+| 200 (default) | 0.50 px | 0.35 | 3.2 | 8 % |
+| 400 | 0.60 px | 0.51 | 3.4 | 12 % |
+| 800 | 0.75 px | 0.65 | 3.6 | 18 % |
+| 1600 | 0.95 px | 0.74 | 3.9 | 25 % |
+| 3200 | 1.20 px | 0.80 | 4.3 | 35 % |
+
+The blob size scales with the image's long side, because grain lives on the
+frame and not on the pixel, so a 2048 px output does not look finer than a
+1024 px one.
+
+**Colour.** Luma grain is the same value added to R, G and B, so a grey pixel
+stays grey exactly. Colour grain is a multiplicative fluctuation of the colour
+a pixel already has: proportional to its saturation, never changing its hue.
+A neutral wall inside a colour photo gets no colour grain, a sepia print only
+varies its toning, and a frame whose mean chroma is under 8/255 (a "B&W"
+decode with a slight cast) is treated as monochrome and gets none at all. The
+`colour_grain` control is `auto` for that behaviour, `off` to force luma-only
+grain on any image, `on` to allow colour grain on a faintly tinted frame.
+
+### Where it goes
+
+Last. Anything after it, a resize, an upscaler, a re-encode, resamples the
+grain into blobs twice the size or averages it away. In ComfyUI, wire the
+**Film Grain** node directly into Save, after VAE DeGrid and VAE Enhance if
+you use them. In Forge Neo the **Film grain** accordion runs on each final
+image after the other two accordions and never on the hires-fix first pass,
+and does not need either of them to be on; it writes `Film grain:
+iso=ISO200;strength=50;chroma=auto` and a `Film grain result` line to the
+parameters. In SwarmUI the **Film Grain** group is inserted after the other two
+steps on the final decode. On every host the status line reports the applied
+amplitude, the measured midtone amplitude, the blob size, the colour decision
+and the seed:
+
+```
+grain ISO 200 strength 50 · 3.3/255 midtone (measured 3.0) · blob 0.56 px · colour grain 8% · seed 42 · 0.03 s
+```
+
+Judge the result at 100 percent. A downscaled preview hides grain and a 2:1
+view exaggerates every preset.
+
+### Tests
+
+`tests/test_film_grain.py` checks the strength anchors, the luminance bell,
+the per-preset statistics (correlation rising with ISO, kurtosis from 3 to
+above 3.5, isotropy), seed reproducibility, the midtone amplitude against
+strength, black and white getting almost nothing, grey staying bit-exactly
+grey at every preset, sepia keeping its hue, a neutral patch inside a colour
+image getting no colour grain, the monochrome detector, batch and RGBA and
+dtype handling. The node and the Forge script have their own wiring tests.
+
 ## SwarmUI
 
 SwarmUI's backend is a real ComfyUI, so this side of the repo does not
@@ -553,6 +662,17 @@ If the group is on and no VAE is selected the generation stops with a message
 saying so. A node pack that predates VAE Enhance is reported on backend
 refresh by the same version check that covers the DeGrid node.
 
+### Film Grain in SwarmUI
+
+A third parameter group, **Film Grain**, on the same node pack: **ISO**,
+**Strength** and **Colour Grain**, with the meaning and defaults of the
+[Film grain](#film-grain) section. It is inserted after VAE DeGrid and VAE
+Enhance on the final decode, never in the refiner path, and does not need
+either of the other groups to be on. The seed is the generation's seed. The
+settings are written to the image metadata as `film_grain`, and the backend
+log shows one `[DeGrid] grain ...` line per image. A node pack that predates
+Film Grain is reported on backend refresh.
+
 ### Notes
 
 - **Version check.** ComfyUI silently ignores inputs a node does not declare. On
@@ -614,6 +734,20 @@ reimplemented in pure PyTorch with a narrower 9-tap kernel, amplitude limiting,
 and per-image auto-calibration.
 
 ## Changelog
+
+### 2026-10-03
+
+- **Film Grain.** A third optional tool on all three hosts, sharing
+  `film_grain_core.py`: seeded, correlated, midtone-weighted grain as the last
+  stage before saving. ISO presets set the character (blob size, clumpiness,
+  colour) and were calibrated against the grain Krea 2 draws when prompted for
+  it, which ISO 200, the default, matches; strength sets the amplitude in
+  /255 units anchored on the midtone visibility threshold. Luma grain is
+  exactly neutral and colour grain only varies the colour a pixel already has,
+  so monochrome and toned images never get colour blotches. See
+  [Film grain](#film-grain).
+- `lib_degrid/loader.py` gained `load_grain_core()`; the SwarmUI version check
+  covers the third node.
 
 ### 2026-09-22
 

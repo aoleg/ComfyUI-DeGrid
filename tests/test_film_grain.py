@@ -1,0 +1,214 @@
+"""Offline tests for film_grain_core.py.
+
+    python -m unittest discover -s tests -v
+
+Needs torch only. The statistics (lag-one autocorrelation, kurtosis, axis ratio)
+are the ones the grain was calibrated with; the thresholds here are loose enough
+to survive a reseed and tight enough to catch a broken blur, bell or gate.
+"""
+
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+import numpy as np
+import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import forge_stubs as stubs  # noqa: E402
+
+from lib_degrid.loader import load_grain_core  # noqa: E402
+
+fg = load_grain_core(str(stubs.REPO_ROOT))
+
+
+def flat(value: float, h: int = 512, w: int = 512, rgb=None) -> torch.Tensor:
+    x = torch.full((1, h, w, 3), float(value))
+    if rgb is not None:
+        x = x * torch.tensor(rgb).view(1, 1, 1, 3)
+    return x
+
+
+def luma_np(x_bhwc: torch.Tensor) -> np.ndarray:
+    return (x_bhwc[0, ..., :3].numpy() @ np.array([0.299, 0.587, 0.114], np.float32)) * 255.0
+
+
+def acf(h: np.ndarray, dy: int, dx: int) -> float:
+    a = h - h.mean(); n = a.std() ** 2 + 1e-9; H, W = a.shape
+    return float((a[dy:, dx:] * a[:H - dy, :W - dx]).mean() / n)
+
+
+def kurt(h: np.ndarray) -> float:
+    a = h - h.mean()
+    return float((a ** 4).mean() / (a ** 2).mean() ** 2)
+
+
+def axis_ratio(h: np.ndarray) -> float:
+    a = h - h.mean(); Fq = np.abs(np.fft.fftshift(np.fft.fft2(a))) ** 2
+    H, W = Fq.shape; yy, xx = np.mgrid[-H // 2:H - H // 2, -W // 2:W - W // 2]
+    r = np.hypot(yy / H, xx / W); ang = np.degrees(np.arctan2(yy / H, xx / W)) % 180
+    band = (r > 0.15) & (r < 0.5)
+    ax = band & ((ang < 10) | (ang > 170) | (np.abs(ang - 90) < 10)); di = band & ((np.abs(ang - 45) < 10) | (np.abs(ang - 135) < 10))
+    return float(Fq[ax].mean() / Fq[di].mean())
+
+
+class MappingTests(unittest.TestCase):
+    def test_strength_anchors(self):
+        self.assertAlmostEqual(fg.strength_to_amp(1), 0.3, delta=0.02)
+        self.assertAlmostEqual(fg.strength_to_amp(50), 3.3, delta=0.15)
+        self.assertAlmostEqual(fg.strength_to_amp(100), 8.0, delta=0.01)
+        self.assertEqual(fg.strength_to_amp(0), 0.0)
+        self.assertEqual(fg.strength_to_amp(150), fg.strength_to_amp(100))
+        # monotone
+        vals = [fg.strength_to_amp(s) for s in range(0, 101)]
+        self.assertTrue(all(b > a for a, b in zip(vals, vals[1:])))
+
+    def test_luminance_bell(self):
+        L = torch.linspace(0, 1, 1001)
+        w = fg.luminance_weight(L)
+        self.assertAlmostEqual(w.max().item(), 1.0, places=3)
+        self.assertEqual(w[0].item(), 0.0)
+        self.assertEqual(w[-1].item(), 0.0)
+        peak = L[w.argmax()].item()
+        self.assertTrue(0.3 < peak < 0.45, peak)
+        self.assertGreater(w[100].item(), w[950].item())  # fades faster toward white than toward black
+
+    def test_presets_and_scale(self):
+        self.assertEqual(tuple(fg.ISO_PRESETS), fg.ISO_NAMES)
+        sig = [fg.ISO_PRESETS[n]["sigma"] for n in fg.ISO_NAMES]
+        self.assertTrue(all(b > a for a, b in zip(sig, sig[1:])))
+        s400 = fg.ISO_PRESETS["ISO 400"]["sigma"]
+        self.assertAlmostEqual(fg.blob_sigma("ISO 400", 1536, 1024), s400)
+        self.assertAlmostEqual(fg.blob_sigma("ISO 400", 3072, 2048), 2 * s400)  # grain lives on the frame, not the pixel
+
+
+class FieldTests(unittest.TestCase):
+    def test_unit_std_and_statistics_per_iso(self):
+        prev_acf = -1.0
+        for name in fg.ISO_NAMES:
+            p = fg.ISO_PRESETS[name]
+            f = fg.grain_field(512, 512, p["sigma"], p["tail"], seed=3, device="cpu")[0, 0].numpy()
+            self.assertAlmostEqual(float(f.std()), 1.0, places=3, msg=name)
+            self.assertAlmostEqual(float(f.mean()), 0.0, places=3, msg=name)
+            a = acf(f, 1, 0)
+            self.assertGreater(a, prev_acf - 0.02, name)  # correlation rises with ISO
+            prev_acf = a
+            self.assertTrue(0.85 < axis_ratio(f) < 1.15, (name, axis_ratio(f)))  # isotropic
+            k = kurt(f)
+            if name == "ISO 100":
+                self.assertTrue(2.8 < k < 3.2, (name, k))
+            if name == "ISO 3200":
+                self.assertGreater(k, 3.5, (name, k))
+        f100 = fg.grain_field(512, 512, fg.ISO_PRESETS["ISO 100"]["sigma"], 0.0, 3, "cpu")[0, 0].numpy()
+        f3200 = fg.grain_field(512, 512, fg.ISO_PRESETS["ISO 3200"]["sigma"], 0.0, 3, "cpu")[0, 0].numpy()
+        self.assertLess(acf(f100, 1, 0), 0.5)
+        self.assertGreater(acf(f3200, 1, 0), 0.7)
+
+    def test_seed_reproducible_and_distinct(self):
+        a = fg.grain_field(64, 64, 0.8, 0.1, 7, "cpu")
+        b = fg.grain_field(64, 64, 0.8, 0.1, 7, "cpu")
+        c = fg.grain_field(64, 64, 0.8, 0.1, 8, "cpu")
+        self.assertTrue(torch.equal(a, b))
+        self.assertFalse(torch.allclose(a, c))
+
+
+class GrainTests(unittest.TestCase):
+    def test_midtone_amplitude_matches_strength(self):
+        x = flat(0.38)  # at the bell's peak
+        for s, expect in ((1, 0.3), (50, 3.3), (100, 8.0)):
+            out, st = fg.add_grain(x, "ISO 400", s, seed=1)
+            d = luma_np(out) - luma_np(x)
+            self.assertAlmostEqual(float(d.std()), expect, delta=expect * 0.08 + 0.05, msg=s)
+            self.assertAlmostEqual(st[0]["midtone_std_255"], float(d.std()), delta=0.05)
+            self.assertEqual(st[0]["chroma_mode"], "monochrome")  # a grey card is monochrome
+        self.assertEqual(st[0]["sigma_px"], fg.ISO_PRESETS["ISO 400"]["sigma"] * 512 / fg.SCALE_REF)
+
+    def test_black_and_white_get_almost_nothing(self):
+        for v in (0.0, 0.02, 0.98, 1.0):
+            out, _ = fg.add_grain(flat(v), "ISO 400", 100, seed=1)
+            d = luma_np(out) - luma_np(flat(v))
+            self.assertLess(float(d.std()), 8.0 * 0.4, v)
+        out, _ = fg.add_grain(flat(0.0), "ISO 400", 100, seed=1)
+        self.assertEqual(float((out - flat(0.0)).abs().max()), 0.0)  # black stays black
+
+    def test_grey_stays_exactly_grey(self):
+        x = flat(0.4)
+        for iso in fg.ISO_NAMES:
+            out, st = fg.add_grain(x, iso, 100, seed=5)
+            self.assertTrue(torch.equal(out[..., 0], out[..., 1]), iso)
+            self.assertTrue(torch.equal(out[..., 1], out[..., 2]), iso)
+            self.assertEqual(st[0]["chroma_mode"], "monochrome")
+        # forced on: still grey, because the per-pixel gate sees no saturation
+        out, st = fg.add_grain(x, "ISO 3200", 100, seed=5, chroma="on")
+        self.assertTrue(torch.equal(out[..., 0], out[..., 2]))
+        self.assertEqual(st[0]["chroma_mode"], "on")
+
+    def test_sepia_keeps_its_hue(self):
+        x = flat(0.5, rgb=(1.0, 0.85, 0.65))  # saturated enough to pass the gate
+        out, st = fg.add_grain(x, "ISO 3200", 100, seed=2)
+        self.assertEqual(st[0]["chroma_mode"], "auto")
+        self.assertGreater(st[0]["chroma_frac"], 0.3)
+        # chroma vector direction unchanged where it is defined: angle in the (R-L, B-L) plane
+        def angle(t):
+            L = (t[..., :3] * torch.tensor([0.299, 0.587, 0.114])).sum(-1, keepdim=True)
+            cv = t[..., :3] - L
+            return torch.atan2(cv[..., 2], cv[..., 0])
+        da = (angle(out) - angle(x)).abs().rad2deg()
+        self.assertLess(da.quantile(0.99).item(), 1.0)
+        # ...and the colour grain is actually there: per-channel deltas are not identical
+        d = out - x
+        self.assertFalse(torch.allclose(d[..., 0], d[..., 2], atol=1e-4))
+        # off: identical deltas on every channel
+        out2, st2 = fg.add_grain(x, "ISO 3200", 100, seed=2, chroma="off")
+        d2 = out2 - x
+        self.assertTrue(torch.allclose(d2[..., 0], d2[..., 2], atol=1e-6))
+        self.assertEqual(st2[0]["chroma_mode"], "off")
+
+    def test_neutral_patch_in_colour_image_gets_no_colour_grain(self):
+        x = flat(0.5, h=256, w=512)
+        x[:, :, 256:] = torch.tensor([0.8, 0.3, 0.3])  # right half saturated red
+        out, st = fg.add_grain(x, "ISO 1600", 100, seed=4)
+        self.assertEqual(st[0]["chroma_mode"], "auto")
+        d = out - x
+        left = d[:, :, :200]; right = d[:, :, 300:]
+        self.assertTrue(torch.allclose(left[..., 0], left[..., 2], atol=1e-6))  # grey half: neutral grain
+        self.assertFalse(torch.allclose(right[..., 0], right[..., 2], atol=1e-4))  # red half: colour grain
+
+    def test_monochrome_detection_on_tinted_frame(self):
+        # a cast of a few levels is still monochrome (a Krea 2 "B&W" decode carries ~5.6/255); 11/255 is not
+        faint = flat(0.5) + torch.tensor([0.012, 0.0, -0.012]).view(1, 1, 1, 3)
+        strong = flat(0.5) + torch.tensor([0.03, 0.0, -0.03]).view(1, 1, 1, 3)
+        self.assertTrue(fg.is_monochrome(faint.permute(0, 3, 1, 2))[0])
+        self.assertFalse(fg.is_monochrome(strong.permute(0, 3, 1, 2))[0])
+
+    def test_batch_rgba_dtype_and_zero_strength(self):
+        rgb = torch.cat([flat(0.4, 64, 64), flat(0.6, 64, 64)], dim=0)
+        alpha = torch.rand(2, 64, 64, 1)
+        x = torch.cat([rgb, alpha], dim=-1).half()
+        out, st = fg.add_grain(x, "ISO 800", 60, seed=10)
+        self.assertEqual(out.dtype, torch.float16)
+        self.assertEqual(tuple(out.shape), (2, 64, 64, 4))
+        self.assertTrue(torch.equal(out[..., 3], x[..., 3]))
+        self.assertEqual([s["seed"] for s in st], [10, 11])
+        self.assertFalse(torch.equal(out[0, ..., :3] - x[0, ..., :3], out[1, ..., :3] - x[1, ..., :3]))
+        out0, st0 = fg.add_grain(x, "ISO 800", 0, seed=10)
+        self.assertTrue(torch.equal(out0, x))
+        self.assertEqual(st0[0]["amp_255"], 0.0)
+
+    def test_status_line_and_validation(self):
+        _, st = fg.add_grain(flat(0.4, 64, 64), "ISO 400", 50, seed=42)
+        line = fg.status_line(st, seconds=0.05)
+        self.assertTrue(line.startswith("grain ISO 400 strength 50 · 3.3/255 midtone"))
+        self.assertIn("monochrome, luma grain only", line)
+        self.assertIn("seed 42", line)
+        self.assertNotIn(":", line)
+        with self.assertRaises(ValueError):
+            fg.add_grain(flat(0.4, 64, 64), "ISO 12800", 50)
+        with self.assertRaises(ValueError):
+            fg.add_grain(flat(0.4, 64, 64), "ISO 400", 50, chroma="maybe")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
