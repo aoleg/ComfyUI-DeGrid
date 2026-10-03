@@ -148,8 +148,8 @@ class FilmGrainScript(scripts.Script):
                 )
             with gr.Row():
                 match_texture = gr.Checkbox(
-                    value=True, label="Match image texture",
-                    info="less grain on clean, crisp renders that carry little fine texture of their own (down to a quarter); never more than the strength asks for",
+                    value=True, label="Same visible grain on textured images",
+                    info="textured or already grainy images hide part of the grain, so they get more (up to 2x); clean renders get exactly the strength's amount; never less",
                 )
 
         self.infotext_fields = [

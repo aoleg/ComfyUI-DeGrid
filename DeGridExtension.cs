@@ -163,7 +163,7 @@ public class DeGridExtension : Extension
             "auto", Group: GrainGroup, FeatureFlag: FeatureId, OrderPriority: 3, IsAdvanced: true,
             GetValues: (_) => ["auto", "on", "off"]
             ));
-        GrainMatchTexture = T2IParamTypes.Register<bool>(new("[Film Grain] Match Image Texture", "[Film Grain]\nScale the amount down on images that carry little fine texture of their own. Grain reads as natural up to about 2-3x the texture an image already has in its flat midtones, and as an overlay on a clean, crisp render.\nThe image's texture floor is measured; below 1.1/255 the amount is reduced in proportion, down to a quarter. Never adds more than the strength asks for. Off = the strength's amount on every image.",
+        GrainMatchTexture = T2IParamTypes.Register<bool>(new("[Film Grain] Same Visible Grain On Textured Images", "[Film Grain]\nKeep the visible amount of grain the same on every image. Texture an image already has hides part of the grain added to it, so a textured or already grainy image gets more (up to 2x) to show as much grain as a clean one.\nA clean render gets exactly the strength's amount. Never reduces it. Off = the strength's amount on every image.",
             "true", Group: GrainGroup, FeatureFlag: FeatureId, OrderPriority: 4
             ));
         // Refiner region ends at -4 and the core final decode ("8") runs at 1. DeGrid at 1.5, Enhance after it, grain last.

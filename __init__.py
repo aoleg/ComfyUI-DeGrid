@@ -315,11 +315,10 @@ class FilmGrain(io.ComfyNode):
                 ),
                 io.Boolean.Input(
                     "match_texture", default=True,
-                    tooltip="Scale the amount down on images that carry little fine texture of their own. "
-                            "Grain reads as natural up to about 2-3x the texture an image already has in "
-                            "its flat midtones and as an overlay on a clean, crisp render. The image's "
-                            "texture floor is measured; below 1.1/255 the amount is reduced in proportion, "
-                            "down to a quarter. Never adds more than the strength asks for. Off = the "
+                    tooltip="Keep the visible amount of grain the same on every image. Texture an image "
+                            "already has hides part of the grain added to it, so a textured or already "
+                            "grainy image gets more (up to 2x) to show as much grain as a clean one. A "
+                            "clean render gets exactly the strength's amount. Never reduces it. Off = the "
                             "strength's amount on every image.",
                 ),
                 io.Int.Input(

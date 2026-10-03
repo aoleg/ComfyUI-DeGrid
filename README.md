@@ -541,17 +541,26 @@ Two controls, deliberately independent:
   3.3/255, which is the just-noticeable difference in midtones, so it reads as
   texture rather than noise; 100 is 8/255, a bit noisy. The model's own
   prompted grain measures 4/255, about strength 60.
-- **Match image texture** (on by default) scales that amount down on images
-  that carry little fine texture of their own. Grain reads as natural when it
-  is up to about two or three times the texture an image already has in its
-  flat midtones, and as an overlay sitting on a clean surface at five times.
-  The same strength-50 grain looked right on a soft 1024 px render of a prompt
-  and wrong on a crisp 1536 px render of the same prompt, whose flat areas
-  carry a third of the texture. The stage measures that texture floor, the
-  quietest tenth of the midtone areas of the frame, and below 1.1/255 reduces
-  the amount in proportion, down to a quarter. It never adds more than the
-  strength asks for, so already-grainy and textured images get the full
-  amount. Turn it off to get exactly the strength's amount on every image.
+- **Same visible grain on textured images** (on by default) keeps the amount
+  of grain you can *see* the same on every image. Texture an image already
+  has hides part of the grain added to it: the eye's threshold for a pattern
+  rises with the contrast of whatever it sits on. A clean render shows every
+  bit of the grain and gets exactly the strength's amount. A textured or
+  already grainy render gets more, so the grain shows as much as it does on
+  a clean one. The stage measures the image's texture floor, the quietest
+  tenth of the midtone areas of the frame; at or below 1.1/255 the image
+  counts as clean, above it the amount rises with the floor to the power 0.6
+  (the slope of contrast masking), at most double and at most 12/255. It never
+  reduces the amount. Turn it off to get exactly the strength's amount on
+  every image.
+
+  | image | texture floor | factor | strength 50 gives |
+  |---|---|---|---|
+  | crisp, clean 1536 px render | 0.45/255 | 1.00 | 3.3/255 |
+  | smooth-skin portrait | 1.23/255 | 1.07 | 3.5/255 |
+  | cat on a sofa | 2.14/255 | 1.49 | 5.0/255 |
+  | portrait with denim and concrete | 2.64/255 | 1.69 | 5.6/255 |
+  | prompted 1950s film grain | 4.78/255 | 2.00 | 6.6/255 |
 
 | ISO | blob sigma at a 1536 px long side | neighbour correlation | kurtosis | colour grain |
 |---|---|---|---|---|
@@ -590,15 +599,15 @@ iso=ISO200;strength=50;chroma=auto;match=1` and a `Film grain result` line to
 the parameters. In SwarmUI the **Film Grain** group is inserted after the other two
 steps on the final decode. On every host the status line reports the applied
 amplitude, the measured midtone amplitude, the texture match, the blob size,
-the colour decision and the seed. On a crisp 1536 px render:
+the colour decision and the seed. On a clean 1536 px render the amount is
+the strength's:
 
 ```
-grain ISO 200 strength 50 · 1.3/255 midtone (measured 1.3) · x0.41 for texture floor 0.45/255 · blob 0.53 px · monochrome (luma grain only) · seed 42 · 0.04 s
+grain ISO 200 strength 50 · 3.3/255 midtone (measured 3.1) · x1.00 for texture floor 0.45/255 · blob 0.53 px · monochrome (luma grain only) · seed 42 · 0.04 s
 ```
 
-On a render that already carries texture, the factor is 1 and the amount is
-the strength's: `3.3/255 midtone (measured 3.0) · x1.00 for texture floor
-1.23/255`.
+On a textured render it is raised to stay as visible: `5.0/255 midtone
+(measured 4.6) · x1.49 for texture floor 2.14/255`.
 
 Judge the result at 100 percent. A downscaled preview hides grain and a 2:1
 view exaggerates every preset.
@@ -683,7 +692,8 @@ refresh by the same version check that covers the DeGrid node.
 ### Film Grain in SwarmUI
 
 A third parameter group, **Film Grain**, on the same node pack: **ISO**,
-**Strength**, **Colour Grain** and **Match Image Texture**, with the meaning
+**Strength**, **Colour Grain** and **Same Visible Grain On Textured Images**,
+with the meaning
 and defaults of the
 [Film grain](#film-grain) section. It is inserted after VAE DeGrid and VAE
 Enhance on the final decode, never in the refiner path, and does not need
@@ -756,12 +766,14 @@ and per-image auto-calibration.
 
 ### 2026-10-04
 
-- **Film grain: match image texture** (new control, on by default). The
-  amount is scaled down on images whose flat midtones carry little fine
-  texture of their own, measured per image; strength-50 grain that read as
-  natural on a soft 1024 px render read as an overlay on a crisp 1536 px render
-  of the same prompt, with a third of the texture. Never more than the
-  strength asks for. See [Film grain](#film-grain).
+- **Film grain: same visible grain on textured images** (new control, on by
+  default). Texture an image already has hides part of the grain added to
+  it, so textured and already grainy images now get more grain, up to
+  double, to show as much as a clean image does; clean renders get exactly
+  the strength's amount. A first version of this control, briefly on `main`,
+  did the opposite and scaled grain *down* on clean renders, which made the
+  default invisible on exactly the images that need grain most. See
+  [Film grain](#film-grain).
 - **Film grain: gentler size scaling.** The blob size now grows with the
   square root of the image's long side instead of in proportion, so a preset
   looks the same at 100 percent across sizes (1536 against 1024: 1.22 times

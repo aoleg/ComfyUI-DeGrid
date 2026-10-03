@@ -16,14 +16,15 @@ colour channels of a finished image. Two controls, deliberately orthogonal:
 * ``strength`` 0..100 sets the *amplitude* alone, in /255 units of midtone
   luma: 0.3 at 1 (under the midtone just-noticeable difference of ~3/255),
   3.3 at 50 (at threshold: reads as texture, not noise), 8 at 100 (grainy).
-* ``match_texture`` (default on) scales that amplitude down on images whose own
-  fine texture is low. Grain reads as natural when it is up to ~2-3x the
-  texture an image already carries in its flat midtones and as an overlay on
-  a clean surface at 5x; the same strength-50 grain looked right on a soft
-  1024 px render (texture floor 1.2/255) and wrong on a crisp 1536 px render of
-  the same prompt (floor 0.45/255). The factor is floor / 1.1, clamped to
-  0.25..1: never more grain than the strength asks for, never less than a
-  quarter of it.
+* ``match_texture`` (default on) keeps the *perceived* amount predictable.
+  Texture an image already carries masks added grain (contrast masking: the
+  visibility threshold rises with the masker's contrast, slope ~0.6 above
+  threshold, Legge & Foley 1980). A clean render shows every bit of the
+  grain, so it gets exactly the strength's amount; a textured or already
+  grainy render gets more, (floor / 1.1) ** 0.6, at most 2x and at most
+  12/255, so the grain stays as visible as it is on a clean image. It never
+  reduces the amount: an earlier version scaled grain *down* on clean images
+  and made strength 50 invisible on exactly the renders that need grain.
 
 Why it looks like film and not like sensor noise:
 
@@ -85,10 +86,13 @@ SCALE_REF = 1536  # px long side at which the preset sigmas apply
 SIGMA_SCALE_EXP = 0.5  # sigma ~ (long side / SCALE_REF) ** this; 1 = frame-anchored, 0 = pixel-anchored
 # match_texture: the texture floor is the 10th percentile, over 64 px blocks whose mean
 # luminance weight is > 0.5 (blocks where grain would actually show), of the std of the
-# 9 px box high-pass of luma. Calibrated 2026-10-04 on the corpus (knowledge_degrid.md §8.15):
-# strength-50 grain read right at floors 1.06-1.2 and wrong at 0.45.
-FLOOR_REF_255 = 1.1
-FLOOR_FACTOR_MIN = 0.25
+# 9 px box high-pass of luma (knowledge_degrid.md §8.15). At or below FLOOR_REF_255 the image
+# counts as clean and gets the strength's amount; above it the amount is raised to make up for
+# masking, never lowered.
+FLOOR_REF_255 = 1.1  # floors of the renders where strength-50 grain was judged by eye: 0.45-1.23
+MASK_EXP = 0.6  # contrast-masking slope above threshold (Legge & Foley 1980: ~0.6-0.7)
+MASK_MAX_FACTOR = 2.0
+AMP_CAP_255 = 12.0  # no boost takes the midtone amplitude above this
 FLOOR_BLOCK = 64
 FLOOR_PERCENTILE = 10.0
 AMP_MIN_255, AMP_MAX_255, AMP_GAMMA = 0.3, 8.0, 1.35
@@ -172,8 +176,9 @@ def texture_floor_255(x_bchw: torch.Tensor) -> float:
 
 
 def texture_factor(floor_255: float) -> float:
-    """Amplitude multiplier for match_texture: floor / FLOOR_REF_255, clamped to FLOOR_FACTOR_MIN..1."""
-    return float(min(1.0, max(FLOOR_FACTOR_MIN, floor_255 / FLOOR_REF_255)))
+    """Amplitude multiplier for match_texture: 1 on a clean image (floor <= FLOOR_REF_255),
+    (floor / FLOOR_REF_255) ** MASK_EXP above it, at most MASK_MAX_FACTOR. Never below 1."""
+    return float(min(MASK_MAX_FACTOR, max(1.0, (max(floor_255, 0.0) / FLOOR_REF_255) ** MASK_EXP)))
 
 
 def _unit(n: torch.Tensor) -> torch.Tensor:
@@ -256,7 +261,7 @@ def add_grain(
         mono, mean_chroma_255 = is_monochrome(xi)
         floor_255 = texture_floor_255(xi) if match_texture else None
         factor = texture_factor(floor_255) if match_texture else 1.0
-        amp = nominal * factor
+        amp = min(nominal * factor, max(nominal, AMP_CAP_255 / 255.0))
         if chroma == "off":
             chroma_mode, chroma_frac = "off", 0.0
         elif chroma == "on":

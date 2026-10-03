@@ -213,8 +213,8 @@ class GrainTests(unittest.TestCase):
         self.assertNotIn("texture floor", line)
         _, st = fg.add_grain(flat(0.4, 64, 64), "ISO 400", 50, seed=42)
         line = fg.status_line(st)
-        self.assertIn("x0.25 for texture floor 0.00/255", line)
-        self.assertTrue(line.startswith("grain ISO 400 strength 50 · 0.8/255 midtone"))
+        self.assertIn("x1.00 for texture floor 0.00/255", line)  # a clean card gets exactly the strength's amount
+        self.assertTrue(line.startswith("grain ISO 400 strength 50 · 3.3/255 midtone"))
         for ln in (line, fg.status_line(st, seconds=0.1)):
             self.assertNotIn(":", ln)  # Forge JSON-quotes infotext values containing a colon...
             self.assertNotIn(",", ln)  # ...or a comma
@@ -247,36 +247,48 @@ class TextureMatchTests(unittest.TestCase):
         self.assertLess(fg.texture_floor_255(x.permute(0, 3, 1, 2)), 0.1)
 
     def test_factor_curve(self):
-        self.assertEqual(fg.texture_factor(0.0), fg.FLOOR_FACTOR_MIN)
-        self.assertAlmostEqual(fg.texture_factor(0.55), 0.5)
+        self.assertEqual(fg.texture_factor(0.0), 1.0)  # clean: never less than the strength asks for
+        self.assertEqual(fg.texture_factor(0.45), 1.0)
         self.assertEqual(fg.texture_factor(1.1), 1.0)
-        self.assertEqual(fg.texture_factor(5.0), 1.0)  # never more grain than the strength asks for
+        self.assertAlmostEqual(fg.texture_factor(2.2), 2 ** 0.6, places=6)
+        self.assertEqual(fg.texture_factor(50.0), fg.MASK_MAX_FACTOR)
+        vals = [fg.texture_factor(f / 10) for f in range(0, 80)]
+        self.assertTrue(all(b >= a for a, b in zip(vals, vals[1:])))  # monotone
 
-    def test_clean_image_gets_less_grain_textured_image_the_full_amount(self):
-        clean, rough = self.textured(0.45, seed=1), self.textured(1.5, seed=2)
+    def test_clean_image_gets_the_full_amount_textured_image_more(self):
+        clean, rough = self.textured(0.45, seed=1), self.textured(3.0, seed=2)
         out_c, st_c = fg.add_grain(clean, "ISO 200", 50, seed=7)
         out_r, st_r = fg.add_grain(rough, "ISO 200", 50, seed=7)
-        self.assertAlmostEqual(st_c[0]["texture_factor"], st_c[0]["floor_255"] / fg.FLOOR_REF_255, places=6)
-        self.assertLess(st_c[0]["texture_factor"], 0.5)
-        self.assertEqual(st_r[0]["texture_factor"], 1.0)
-        self.assertAlmostEqual(st_c[0]["amp_255"], st_c[0]["nominal_255"] * st_c[0]["texture_factor"], places=6)
+        self.assertEqual(st_c[0]["texture_factor"], 1.0)
+        self.assertAlmostEqual(st_c[0]["amp_255"], fg.strength_to_amp(50), places=6)
+        self.assertGreater(st_r[0]["texture_factor"], 1.5)
+        self.assertAlmostEqual(st_r[0]["amp_255"], st_r[0]["nominal_255"] * st_r[0]["texture_factor"], places=6)
         added_c = (luma_np(out_c) - luma_np(clean)).std()
         added_r = (luma_np(out_r) - luma_np(rough)).std()
-        self.assertLess(added_c, added_r * 0.55)
+        self.assertGreater(added_r, added_c * 1.4)
         # off: the nominal amount on both
-        _, st_off = fg.add_grain(clean, "ISO 200", 50, seed=7, match_texture=False)
+        _, st_off = fg.add_grain(rough, "ISO 200", 50, seed=7, match_texture=False)
         self.assertAlmostEqual(st_off[0]["amp_255"], fg.strength_to_amp(50), places=6)
 
+    def test_boost_is_capped(self):
+        rough = self.textured(20.0, seed=3)
+        _, st = fg.add_grain(rough, "ISO 200", 50, seed=7)
+        self.assertEqual(st[0]["texture_factor"], fg.MASK_MAX_FACTOR)
+        _, st100 = fg.add_grain(rough, "ISO 200", 100, seed=7)
+        self.assertAlmostEqual(st100[0]["amp_255"], max(fg.AMP_CAP_255, fg.strength_to_amp(100)), places=6)
+        _, st0 = fg.add_grain(rough, "ISO 200", 0, seed=7)
+        self.assertEqual(st0[0]["amp_255"], 0.0)  # strength 0 stays off
+
     def test_strength_still_controls_a_matched_image(self):
-        clean = self.textured(0.45, seed=1)
-        amps = [fg.add_grain(clean, "ISO 200", s, seed=7)[1][0]["amp_255"] for s in (25, 50, 100)]
+        rough = self.textured(3.0, seed=1)
+        amps = [fg.add_grain(rough, "ISO 200", s, seed=7)[1][0]["amp_255"] for s in (25, 50, 75)]
         self.assertTrue(amps[0] < amps[1] < amps[2], amps)
 
     def test_batch_images_are_matched_individually(self):
-        x = torch.cat([self.textured(0.4, 256, 256, 1), self.textured(2.0, 256, 256, 2)], dim=0)
+        x = torch.cat([self.textured(0.4, 256, 256, 1), self.textured(3.0, 256, 256, 2)], dim=0)
         _, st = fg.add_grain(x, "ISO 200", 50, seed=3)
-        self.assertLess(st[0]["texture_factor"], 0.5)
-        self.assertEqual(st[1]["texture_factor"], 1.0)
+        self.assertEqual(st[0]["texture_factor"], 1.0)
+        self.assertGreater(st[1]["texture_factor"], 1.5)
 
 
 if __name__ == "__main__":

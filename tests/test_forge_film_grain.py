@@ -101,17 +101,17 @@ class ScriptTests(unittest.TestCase):
         expected, _ = fg.add_grain(x_in, "ISO 200", 50, seed=8, match_texture=False)
         self.assertTrue(torch.allclose(x_out, expected, atol=1.0 / 255))
 
-    def test_match_texture_reduces_grain_on_a_clean_image(self):
+    def test_match_texture_gives_a_clean_image_the_full_amount(self):
         p = self.processing(seeds=(7,))
-        image = pil_image(0.38)  # a perfectly clean card: floor 0, factor at its minimum
+        image = pil_image(0.38)  # a perfectly clean card: floor 0
         pp = self.pp_cls(image, 0)
         self.script.process(p, *self.args(enabled=True))
         self.assertTrue(p.extra_generation_params[script_mod.INFOTEXT_KEY].endswith(";match=1"))
         self.script.postprocess_image_after_composite(p, pp, *self.args(enabled=True))
         result = p.extra_generation_params[script_mod.INFOTEXT_RESULT_KEY]
-        self.assertIn("x0.25 for texture floor 0.00/255", result)
+        self.assertIn("x1.00 for texture floor 0.00/255", result)
         d = (as_tensor(pp.image) - as_tensor(image))[..., 0] * 255.0
-        self.assertAlmostEqual(d.std().item(), fg.strength_to_amp(50) * fg.FLOOR_FACTOR_MIN, delta=0.35)
+        self.assertAlmostEqual(d.std().item(), fg.strength_to_amp(50), delta=0.5)
 
     def test_seed_fallbacks(self):
         p = self.processing(seeds=(5,))
