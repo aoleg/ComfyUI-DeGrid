@@ -20,7 +20,9 @@ colour channels of a finished image. Two controls, deliberately orthogonal:
 
 * ``iso`` picks a preset that sets the grain's *character*: blob radius,
   tail-heaviness (fine film sums to Gaussian, fast film clumps) and how much
-  colour grain a colour image gets. It never changes the amplitude.
+  colour grain a colour image gets. It changes the amplitude only to keep the
+  perceived amount the same: coarse grain reads louder, so ``ISO_LOUDNESS``
+  scales each preset to look as loud as ISO 400 (matched by eye).
 * ``strength`` 0..100 sets the *amplitude* alone, in /255 units of midtone
   luma: 0.3 at 1 (under the midtone just-noticeable difference of ~3/255),
   3.3 at 50 (at threshold: reads as texture, not noise), 8 at 100 (grainy).
@@ -53,7 +55,7 @@ Why it looks like film and not like sensor noise:
   clumpiness change, never the amount.
 * **Amount follows tone, by film type.** ``film`` = "print" (default: the
   model renders prints and reversal slides) puts the most grain in the darks
-  (~1.6x the midtone amount), less in the mids, little in the brights and
+  (1.75x the midtone amount at luma 0.10), less in the mids, little in the brights and
   none on pure black or pure white. "negative" (a negative scan) puts more in
   the highlights, where a scan of the dense negative is noisiest. The amount
   is never more than about half the pixel's distance to black or white, so
@@ -83,7 +85,7 @@ import torch
 import torch.nn.functional as F
 
 ISO_NAMES = ("ISO 100", "ISO 200", "ISO 400", "ISO 800", "ISO 1600", "ISO 3200", "ISO 6400")
-ISO_DEFAULT = "ISO 400"  # the model's own prompted grain measures a lag-one autocorrelation of 0.34 after the 9 px high-pass; ISO 400 measures 0.35
+ISO_DEFAULT = "ISO 400"  # the model's own prompted grain: lag-one autocorrelation 0.34 after the 9 px high-pass; this preset measured 0.35 as one field, 0.29 at mid grey since size follows exposure (coarser in the darks)
 STRENGTH_DEFAULT = 50.0
 CHROMA_MODES = ("auto", "on", "off")
 
