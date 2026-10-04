@@ -250,7 +250,11 @@ class ToneAndSizeTests(unittest.TestCase):
         self.assertEqual(float(pr[0]), 0.0)
         self.assertEqual(float(pr[-1]), 0.0)
         self.assertEqual(float(pr[-2]), 0.0)
-        self.assertGreater(float(pr[2]), 1.5)  # darks get the most
+        shadows = float(fg.amount_weight(torch.tensor([0.22]), "print"))
+        self.assertGreater(shadows, 1.5)  # the shadows get the most
+        self.assertEqual(shadows, float(fg.amount_weight(torch.linspace(0, 1, 1001), "print").max()))
+        near_black = fg.amount_weight(torch.tensor([0.03, 0.06]), "print")
+        self.assertTrue(bool((near_black < shadows * 0.6).all()), near_black)  # near black about half: a night sky must not sparkle
         self.assertLess(float(pr[6]), 0.4)  # brights little
         ng = fg.amount_weight(L, "negative")
         self.assertGreater(float(ng[6]), 1.1)  # a negative scan: more in the highlights

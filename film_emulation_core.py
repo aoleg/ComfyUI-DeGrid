@@ -54,9 +54,10 @@ Why it looks like film and not like sensor noise:
   two are blended per pixel by luminance, renormalised so only the size and
   clumpiness change, never the amount.
 * **Amount follows tone, by film type.** ``film`` = "print" (default: the
-  model renders prints and reversal slides) puts the most grain in the darks
-  (1.75x the midtone amount at luma 0.10), less in the mids, little in the brights and
-  none on pure black or pure white. "negative" (a negative scan) puts more in
+  model renders prints and reversal slides) puts the most grain in the
+  shadows (1.6x the midtone amount at luma 0.22), about half that near black
+  (a night sky sparkled at the old 1.75x peak at 0.10), less in the mids,
+  little in the brights and none on pure black or pure white. "negative" (a negative scan) puts more in
   the highlights, where a scan of the dense negative is noisiest. The amount
   is never more than about half the pixel's distance to black or white, so
   grain never clips into raised blacks.
@@ -141,7 +142,7 @@ FILM_DEFAULT = "print"
 # Amount per tone: (luma, weight) knots, linearly interpolated, weight 1 at the 0.45 midtone where
 # strength is defined.
 AMOUNT_CURVES: dict[str, tuple[tuple[float, float], ...]] = {
-    "print": ((0.0, 0.0), (0.03, 1.55), (0.10, 1.75), (0.25, 1.55), (0.45, 1.0), (0.65, 0.6), (0.80, 0.33), (0.90, 0.12), (0.95, 0.0), (1.0, 0.0)),
+    "print": ((0.0, 0.0), (0.03, 0.45), (0.08, 0.9), (0.15, 1.4), (0.22, 1.6), (0.32, 1.45), (0.45, 1.0), (0.65, 0.6), (0.80, 0.33), (0.90, 0.12), (0.95, 0.0), (1.0, 0.0)),  # peak in the shadows, half as much near black (the night sky sparkled at 1.75 x at 0.10)
     "negative": ((0.0, 0.0), (0.03, 0.45), (0.12, 0.6), (0.45, 1.0), (0.70, 1.25), (0.85, 1.3), (0.92, 0.8), (0.97, 0.0), (1.0, 0.0)),
 }
 MIDTONE_REF = 0.45

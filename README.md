@@ -324,7 +324,7 @@ A seeded noise field, blurred to the grain's blob size, clumped a little for the
 - **ISO** sets the grain's *character* and never its amount: blob size, how clumpy it is and how much colour grain a colour image gets. The names were checked against real film stock: ISO 400, the default, is the grain Krea 2 draws itself when prompted for film grain, and looks like a cheap ISO 400 or a fine ISO 800 stock. ISO 100 and 200 are near-white and blend into skin as fine texture; ISO 800 and up are larger, clumpier blobs that sit on the image, with more colour grain on saturated colours.
 - **Grain** 0 to 100 sets the amount alone, at a mid grey (luma 0.45): 0 is off, 1 is 0.3/255 and under the eye's threshold, 50 is 3.3/255, the just-noticeable difference in midtones, so it reads as texture rather than noise, and 100 is 8/255, a bit noisy. The model's own prompted grain measures about 4/255, grain 60.
 - **The same amount at every ISO.** Coarse, clumpy grain reads louder than fine grain of the same amplitude, so each preset's amplitude is scaled to look as loud as ISO 400 at the same setting. ISO 200, 1600 and 6400 were matched by eye against ISO 400 at grain 50 and 100; the picks follow the square root of the blob size, which sets the other presets.
-- **Film type** sets how much grain each tone gets. `print` (the default) is a print or a reversal slide, which is what the model draws: the most grain in the darks (1.75 times the midtone amount at luma 0.10), less in the mids, little in the brights (a third at 0.80) and none from 0.95 up. `negative` is a negative scan, with more grain in the highlights (1.3 times at 0.85) and less in the shadows. Near black and white the grain is held to half the distance to black or white, so it never clips into raised blacks.
+- **Film type** sets how much grain each tone gets. `print` (the default) is a print or a reversal slide, which is what the model draws: the most grain in the shadows (1.6 times the midtone amount at luma 0.22), about half that near black, less in the mids, little in the brights (a third at 0.80) and none from 0.95 up. The peak sat at 0.10 at first, and a night sky sparkled with fine grain. `negative` is a negative scan, with more grain in the highlights (1.3 times at 0.85) and less in the shadows. Near black and white the grain is held to half the distance to black or white, so it never clips into raised blacks.
 - **Size follows exposure**, whatever the film type. On film only the largest, most sensitive crystals catch enough light in an underexposed area to develop, so shadows show sparse, coarse, clumpy grain, and where much light arrived crystals of every size develop into fine grain. The field is two fields blended by luma: 1.35 times the preset's blob size in the shadows, 1/1.35 in the highlights, with a little more clumping in the shadows.
 - **No grain on paper.** A uniform light band along at least three edges of the image, with a busy picture inside, is a print or Polaroid border and gets no grain at all; flat, bright, grey patches inside the picture (a paper-white highlight) get none either. Grain lives in the emulsion, not on the paper.
 - **Same visible grain on textured images** (on by default) keeps the amount of grain you can *see* the same on every image. Texture an image already has hides part of the grain added to it: the eye's threshold for a pattern rises with the contrast of whatever it sits on. A clean render shows every bit of the grain and gets exactly the setting's amount; a textured or already grainy render gets more. The stage measures the image's texture floor, the quietest tenth of the midtone areas of the picture; at or below 1.1/255 the image counts as clean, above it the amount rises with the floor to the power 0.6 (the slope of contrast masking), at most 1.4 times and at most 12/255. It never reduces the amount. Off gives exactly the setting's amount on every image.
@@ -336,7 +336,7 @@ A seeded noise field, blurred to the grain's blob size, clumped a little for the
 | cat on a sofa | 2.14/255 | 1.40 | 4.6/255 |
 | night street | 6.73/255 | 1.40 | 4.6/255 |
 
-The limit was 2 times at first. Night scenes were the first images to reach it, and together with the extra grain in the darks they put 11/255 into the shadows, far more than the same setting on a clean render; at 1.4 they get 7.8.
+The limit was 2 times at first. Night scenes were the first images to reach it, and together with the extra grain in the darks they put 11/255 into the shadows, far more than the same setting on a clean render; at 1.4 they got 7.8, and with the lower near-black amount since, about 7 in the shadows and 5 near black.
 
 | ISO | blob size at a 1536 px long side, highlights to shadows | neighbour correlation at mid grey | kurtosis | colour grain | amplitude at grain 50 |
 |---|---|---|---|---|---|
@@ -372,14 +372,14 @@ Last. Anything after it, a resize, an upscaler, a re-encode, resamples the grain
 On every host the status line reports the applied amplitude, the measured midtone amplitude, the texture match, the blob sizes, the colour decision, the optics that are on, a detected border and the seed. On a clean render the amount is the setting's:
 
 ```
-grain ISO 400 strength 50 · 3.3/255 midtone (measured 3.3) · x1.00 for texture floor 0.68/255 · blob 0.39-0.72 px · colour grain 8% · seed 42
+grain ISO 400 strength 50 · 3.3/255 midtone (measured 3.4) · x1.00 for texture floor 0.68/255 · blob 0.39-0.72 px · colour grain 8% · seed 42
 ```
 
 On the night street with optics on, and on a Polaroid:
 
 ```
-grain ISO 400 strength 50 · 4.6/255 midtone (measured 4.9) · x1.40 for texture floor 5.88/255 · blob 0.39-0.72 px · colour grain 8% · softness 25 halation 50 bloom 25 roll-off 50 · seed 42
-grain ISO 400 strength 50 · 4.4/255 midtone (measured 4.6) · x1.33 for texture floor 1.78/255 · blob 0.39-0.72 px · colour grain 8% · frame excluded 104/351/83/78 px · seed 42
+grain ISO 400 strength 50 · 4.6/255 midtone (measured 5.0) · x1.40 for texture floor 5.88/255 · blob 0.39-0.72 px · colour grain 8% · softness 25 halation 50 bloom 25 roll-off 50 · seed 42
+grain ISO 400 strength 50 · 4.4/255 midtone (measured 4.7) · x1.33 for texture floor 1.78/255 · blob 0.39-0.72 px · colour grain 8% · frame excluded 104/351/83/78 px · seed 42
 ```
 
 Judge the result at 100 percent. A downscaled preview hides grain and a 2:1 view exaggerates every preset. The optics need the whole picture: a glow belongs to the frame, not to a crop. With everything on, a 1280x1728 image takes about 0.25 s on a CPU and 0.03 s on a GPU.
