@@ -37,9 +37,9 @@ public class DeGridExtension : Extension
     /// <summary>The third node of the same pack: film emulation, the last thing that touches the final image.</summary>
     public const string FilmNodeId = "FilmEmulation";
 
-    public static string[] RequiredFilmNodeInputs = ["image", "enabled", "iso", "grain", "colour_grain", "match_texture", "film_type", "seed"];
+    public static string[] RequiredFilmNodeInputs = ["image", "enabled", "iso", "grain", "colour_grain", "match_texture", "film_type", "softness", "halation", "bloom", "highlight_rolloff", "seed"];
 
-    public static readonly string[] GrainIsoNames = ["ISO 100", "ISO 200", "ISO 400", "ISO 800", "ISO 1600", "ISO 3200"];
+    public static readonly string[] GrainIsoNames = ["ISO 100", "ISO 200", "ISO 400", "ISO 800", "ISO 1600", "ISO 3200", "ISO 6400"];
 
     /// <summary>Process-wide init claim. The feature install clones this repo into DLNodes/, and SwarmUI's compile
     /// glob does not exclude DLNodes, so this file is compiled twice: once into the core assembly from that clone and
@@ -67,7 +67,7 @@ public class DeGridExtension : Extension
 
     public static T2IRegisteredParam<string> GrainIso, GrainChroma, GrainFilmType;
 
-    public static T2IRegisteredParam<double> GrainStrength;
+    public static T2IRegisteredParam<double> GrainStrength, FilmSoftness, FilmHalation, FilmBloom, FilmRolloff;
 
     public static T2IRegisteredParam<bool> GrainMatchTexture;
 
@@ -150,9 +150,9 @@ public class DeGridExtension : Extension
             "false", Group: EnhanceGroup, FeatureFlag: FeatureId, OrderPriority: 8, IsAdvanced: true
             ));
         FilmGroup = new("Film Emulation", Toggles: true, Open: false, IsAdvanced: true,
-            Description: "Makes the final image look shot on film, as the very last step.\nGrain: a seeded, spatially correlated noise field, coarser and stronger in the shadows, none on white photo borders. ISO sets the grain's character (blob size, clumpiness, colour), never its amount; ISO 200 matches the grain Krea 2 draws itself when prompted for it. Grain sets the amount alone, the same on every ISO: 0 is off, 1 is invisible, 50 reads as texture rather than noise, 100 is a bit noisy.\nGrey stays exactly grey; colour grain never adds a hue and is off on monochrome images. Judge the result at 100%. Needs the same ComfyUI-DeGrid node pack as VAE DeGrid.");
-        GrainIso = T2IParamTypes.Register<string>(new("[Film Emulation] ISO", "[Film Emulation]\nGrain character, not amount. ISO 100 is near-white and blends into skin as fine texture; ISO 200 (default) is the model's own grain; ISO 400 and up are larger, clumpier blobs that sit on the image like film at that speed, with more colour grain on saturated colours.",
-            "ISO 200", Group: FilmGroup, FeatureFlag: FeatureId, OrderPriority: 1,
+            Description: "Makes the final image look shot on film, as the very last step.\nGrain: a seeded, spatially correlated noise field, coarser and stronger in the shadows, none on white photo borders. ISO sets the grain's character (blob size, clumpiness, colour), never its amount; ISO 400 matches the grain Krea 2 draws itself when prompted for it. Grain sets the amount alone, the same on every ISO: 0 is off, 1 is invisible, 50 reads as texture rather than noise, 100 is a bit noisy.\nGrey stays exactly grey; colour grain never adds a hue and is off on monochrome images. Judge the result at 100%. Needs the same ComfyUI-DeGrid node pack as VAE DeGrid.");
+        GrainIso = T2IParamTypes.Register<string>(new("[Film Emulation] ISO", "[Film Emulation]\nGrain character, not amount, named after real film stock. ISO 100 and 200 are fine and near-white and blend into skin as texture; ISO 400 (default) is the model's own grain, a cheap ISO 400 or a fine ISO 800 stock; ISO 800 and up are larger, clumpier blobs that sit on the image, with more colour grain on saturated colours.",
+            "ISO 400", Group: FilmGroup, FeatureFlag: FeatureId, OrderPriority: 1,
             GetValues: (_) => [.. GrainIsoNames]
             ));
         GrainStrength = T2IParamTypes.Register<double>(new("[Film Emulation] Grain", "[Film Emulation]\nGrain amount at midtones: 0 = off, 1 = 0.3/255 (invisible), 50 = 3.3/255 (at the eye's midtone threshold: texture, not noise), 100 = 8/255 (grainy). Film Type sets how much the other tones get.",
@@ -169,6 +169,22 @@ public class DeGridExtension : Extension
         GrainFilmType = T2IParamTypes.Register<string>(new("[Film Emulation] Film Type", "[Film Emulation]\nWhere the grain shows most. Print (default): a print or a reversal slide, most grain in the darks, less in the mids, little in the brights, none on pure black or white.\nNegative scan: more grain in the highlights. Grain size follows exposure either way: coarser in the shadows.",
             "print", Group: FilmGroup, FeatureFlag: FeatureId, OrderPriority: 5, IsAdvanced: true,
             GetValues: (_) => ["print///Print or slide", "negative///Negative scan"]
+            ));
+        FilmSoftness = T2IParamTypes.Register<double>(new("[Film Emulation] Softness", "[Film Emulation]\nSlightly lower acutance than a digital render: a blend toward a 1 px Gaussian in linear light (lens plus emulsion).\n0 = off.",
+            "0", Min: 0, Max: 100, Step: 1, Group: FilmGroup, FeatureFlag: FeatureId, OrderPriority: 6,
+            ViewType: ParamViewType.SLIDER
+            ));
+        FilmHalation = T2IParamTypes.Register<double>(new("[Film Emulation] Halation", "[Film Emulation]\nA red-orange glow around bright light sources: light reflected off the film base back into the red layer (CineStill has no anti-halation layer). Neutral on monochrome images.\n0 = off.",
+            "0", Min: 0, Max: 100, Step: 1, Group: FilmGroup, FeatureFlag: FeatureId, OrderPriority: 7,
+            ViewType: ParamViewType.SLIDER
+            ));
+        FilmBloom = T2IParamTypes.Register<double>(new("[Film Emulation] Bloom", "[Film Emulation]\nA wide, soft glow around highlights in their own colour, as from a diffusion filter or lens glare. A bright area glows into its surroundings, not onto itself.\n0 = off.",
+            "0", Min: 0, Max: 100, Step: 1, Group: FilmGroup, FeatureFlag: FeatureId, OrderPriority: 8,
+            ViewType: ParamViewType.SLIDER
+            ));
+        FilmRolloff = T2IParamTypes.Register<double>(new("[Film Emulation] Highlight Roll-Off", "[Film Emulation]\nA soft film shoulder on the brightest channel instead of a hard digital clip; hue is kept. Pure white lands at about 237/255 at 25, 226 at 50 and 214 at 100. Also takes the light Halation and Bloom add above white.\n0 = off.",
+            "0", Min: 0, Max: 100, Step: 1, Group: FilmGroup, FeatureFlag: FeatureId, OrderPriority: 9,
+            ViewType: ParamViewType.SLIDER
             ));
         // Refiner region ends at -4 and the core final decode ("8") runs at 1. DeGrid at 1.5, Enhance after it, grain last.
         WorkflowGenerator.AddStep(ApplyToRefinerDecode, -3.9);
@@ -379,10 +395,10 @@ public class DeGridExtension : Extension
             Logs.Debug($"[DeGrid] Film Emulation: final media is {g.CurrentMedia.DataType}, not an image; skipped.");
             return;
         }
-        string iso = g.UserInput.Get(GrainIso, "ISO 200");
+        string iso = g.UserInput.Get(GrainIso, "ISO 400");
         if (!GrainIsoNames.Contains(iso))
         {
-            iso = "ISO 200";
+            iso = "ISO 400";
         }
         string chroma = g.UserInput.Get(GrainChroma, "auto");
         double grain = g.UserInput.Get(GrainStrength, 50);
@@ -392,6 +408,8 @@ public class DeGridExtension : Extension
         {
             film = "print";
         }
+        double soft = g.UserInput.Get(FilmSoftness, 0), halation = g.UserInput.Get(FilmHalation, 0);
+        double bloom = g.UserInput.Get(FilmBloom, 0), rolloff = g.UserInput.Get(FilmRolloff, 0);
         long seed = g.UserInput.Get(T2IParamTypes.Seed, 0);
         string node = g.CreateNode(FilmNodeId, new JObject()
         {
@@ -402,10 +420,14 @@ public class DeGridExtension : Extension
             ["colour_grain"] = chroma,
             ["match_texture"] = match,
             ["film_type"] = film,
+            ["softness"] = soft,
+            ["halation"] = halation,
+            ["bloom"] = bloom,
+            ["highlight_rolloff"] = rolloff,
             ["seed"] = seed
         });
         g.CurrentMedia = g.CurrentMedia.WithPath([node, 0]);
-        g.UserInput.ExtraMeta["film_emulation"] = $"iso={iso.Replace(" ", "")};grain={grain};chroma={chroma};match={(match ? 1 : 0)};film={film};seed={seed}";
+        g.UserInput.ExtraMeta["film_emulation"] = $"iso={iso.Replace(" ", "")};grain={grain};chroma={chroma};match={(match ? 1 : 0)};film={film};soft={soft};halation={halation};bloom={bloom};rolloff={rolloff};seed={seed}";
     }
 
     /// <summary>The refiner step (-4) decodes to the reserved node "24" when it upscales in pixel space, saves an

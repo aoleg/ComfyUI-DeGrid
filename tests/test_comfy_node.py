@@ -153,21 +153,31 @@ class NodeSchemaTests(unittest.TestCase):
         self.assertEqual(defaults["colour_grain"], "auto")
         self.assertTrue(defaults["match_texture"])
         self.assertEqual(defaults["film_type"], "print")
+        for k in ("softness", "halation", "bloom", "highlight_rolloff"):
+            self.assertEqual(defaults[k], 0.0, k)  # every optical stage is off until asked for
+        ids = [i.id for i in schema.inputs]
+        self.assertEqual(ids[-5:], ["softness", "halation", "bloom", "highlight_rolloff", "seed"])
+        optics_off = dict(softness=0.0, halation=0.0, bloom=0.0, highlight_rolloff=0.0)
         seed = next(i for i in schema.inputs if i.id == "seed")
         self.assertTrue(seed.kwargs.get("control_after_generate"))
         img = torch.full((1, 96, 128, 3), 0.38)
-        out = node_pkg.FilmEmulation.execute(image=img, enabled=True, iso="ISO 200", grain=50.0, colour_grain="auto", match_texture=True, film_type="print", seed=3)
+        out = node_pkg.FilmEmulation.execute(image=img, enabled=True, iso="ISO 400", grain=50.0, colour_grain="auto", match_texture=True, film_type="print", seed=3, **optics_off)
         self.assertEqual(tuple(out.args[0].shape), tuple(img.shape))
-        self.assertIn("grain ISO 200 strength 50", out.ui["text"])
+        self.assertIn("grain ISO 400 strength 50", out.ui["text"])
         self.assertIn("seed 3", out.ui["text"])
         self.assertIn("texture floor", out.ui["text"])
-        expected, _ = node_pkg.film_core.add_grain(img, "ISO 200", 50, seed=3, match_texture=True)
+        expected, _ = node_pkg.film_core.add_grain(img, "ISO 400", 50, seed=3, match_texture=True)
         self.assertTrue(torch.equal(out.args[0], expected))
-        out = node_pkg.FilmEmulation.execute(image=img, enabled=True, iso="ISO 200", grain=50.0, colour_grain="auto", match_texture=False, film_type="negative", seed=3)
+        out = node_pkg.FilmEmulation.execute(image=img, enabled=True, iso="ISO 400", grain=50.0, colour_grain="auto", match_texture=False, film_type="negative", seed=3, **optics_off)
         self.assertIn("negative scan", out.ui["text"])
         self.assertNotIn("texture floor", out.ui["text"])
-        out = node_pkg.FilmEmulation.execute(image=img, enabled=False, iso="ISO 200", grain=50.0, colour_grain="auto", match_texture=True, film_type="print", seed=3)
+        out = node_pkg.FilmEmulation.execute(image=img, enabled=False, iso="ISO 400", grain=50.0, colour_grain="auto", match_texture=True, film_type="print", seed=3, **optics_off)
         self.assertIs(out.args[0], img)
+        out = node_pkg.FilmEmulation.execute(image=img, enabled=True, iso="ISO 400", grain=0.0, colour_grain="auto", match_texture=True, film_type="print", seed=3,
+                                             softness=20.0, halation=0.0, bloom=0.0, highlight_rolloff=40.0)
+        self.assertIn("grain off · softness 20 roll-off 40", out.ui["text"])
+        expected, _ = node_pkg.film_core.emulate(img, grain=0, seed=3, softness=20, rolloff=40)
+        self.assertTrue(torch.equal(out.args[0], expected))
 
     def test_extension_lists_all_nodes(self):
         import asyncio

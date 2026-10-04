@@ -282,11 +282,15 @@ class FilmEmulation(io.ComfyNode):
                 "so wire it directly into Save.\n\n"
                 "Grain: a seeded, spatially correlated noise field, coarser and stronger in the "
                 "shadows, none on white photo borders. iso sets the grain's character (blob "
-                "size, clumpiness, colour), never its amount; ISO 200 matches the grain Krea 2 "
+                "size, clumpiness, colour), never its amount; ISO 400 matches the grain Krea 2 "
                 "draws itself when prompted for it. grain sets the amount alone, the same on "
                 "every image and every ISO: 0 is off, 1 is under the eye's threshold, 50 reads "
                 "as texture rather than noise (the picture looks more detailed, not noisier), "
                 "100 is a bit noisy.\n\n"
+                "Optics, each 0..100 and off at 0, run before the grain in linear light: "
+                "softness (slightly lower acutance), halation (red glow around lights), bloom "
+                "(soft glow around highlights), highlight_rolloff (a film shoulder instead of "
+                "a hard clip). A white photo border is left out of every stage.\n\n"
                 "Grey stays exactly grey: luma grain is identical on R, G and B. Colour grain "
                 "only ever varies the colour a pixel already has, never adds a hue, and is "
                 "switched off automatically on monochrome images. Judge the result at 100%."
@@ -297,10 +301,11 @@ class FilmEmulation(io.ComfyNode):
                 io.Boolean.Input("enabled", default=True, tooltip="Off = the image passes through completely untouched."),
                 io.Combo.Input(
                     "iso", options=list(film_core.ISO_NAMES), default=film_core.ISO_DEFAULT,
-                    tooltip="Grain character, not amount. ISO 100: near-white, blends into skin as fine "
-                            "texture. ISO 200 (default): the model's own grain. ISO 400 and up: larger, "
-                            "clumpier blobs that sit on the image like film at that speed, with more "
-                            "colour grain on saturated colours.",
+                    tooltip="Grain character, not amount, named after real film stock. ISO 100 and 200: "
+                            "fine, near-white, blend into skin as texture. ISO 400 (default): the "
+                            "model's own grain, a cheap ISO 400 or a fine ISO 800 stock. ISO 800 and up: "
+                            "larger, clumpier blobs that sit on the image, with more colour grain on "
+                            "saturated colours.",
                 ),
                 io.Float.Input(
                     "grain", default=film_core.STRENGTH_DEFAULT, min=0.0, max=100.0, step=1.0,
@@ -329,6 +334,22 @@ class FilmEmulation(io.ComfyNode):
                             "pure black or white. negative: a negative scan, more grain in the "
                             "highlights. Grain size follows exposure either way: coarser in the shadows.",
                 ),
+                io.Float.Input(
+                    "softness", default=0.0, min=0.0, max=100.0, step=1.0,
+                    tooltip="Slightly lower acutance than a digital render: a blend toward a 1 px Gaussian in linear light (lens plus emulsion). 0 = off.",
+                ),
+                io.Float.Input(
+                    "halation", default=0.0, min=0.0, max=100.0, step=1.0,
+                    tooltip="A red-orange glow around bright light sources: light reflected off the film base back into the red layer (CineStill has no anti-halation layer). Neutral on monochrome images. 0 = off.",
+                ),
+                io.Float.Input(
+                    "bloom", default=0.0, min=0.0, max=100.0, step=1.0,
+                    tooltip="A wide, soft glow around highlights in their own colour, as from a diffusion filter or lens glare. A bright area glows into its surroundings, not onto itself. 0 = off.",
+                ),
+                io.Float.Input(
+                    "highlight_rolloff", default=0.0, min=0.0, max=100.0, step=1.0,
+                    tooltip="A soft film shoulder on the brightest channel instead of a hard digital clip; hue is kept. Pure white lands at about 237/255 at 25, 226 at 50 and 214 at 100. Also takes the light halation and bloom add above white. 0 = off.",
+                ),
                 io.Int.Input(
                     "seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF, control_after_generate=True,
                     tooltip="Grain pattern seed. Each image in a batch uses seed + its index.",
@@ -338,11 +359,14 @@ class FilmEmulation(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, image, enabled, iso, grain, colour_grain, match_texture, film_type, seed):
+    def execute(cls, image, enabled, iso, grain, colour_grain, match_texture, film_type, softness, halation, bloom, highlight_rolloff, seed):
         if not enabled:
             return io.NodeOutput(image, ui=ui.PreviewText("bypassed (enabled = off)"))
         t0 = time.perf_counter()
-        out, stats = film_core.add_grain(image, iso=iso, strength=float(grain), seed=int(seed), chroma=colour_grain, match_texture=bool(match_texture), film=film_type)
+        out, stats = film_core.emulate(
+            image, iso=iso, grain=float(grain), seed=int(seed), chroma=colour_grain, match_texture=bool(match_texture), film=film_type,
+            softness=float(softness), halation=float(halation), bloom=float(bloom), rolloff=float(highlight_rolloff),
+        )
         line = film_core.status_line(stats, seconds=time.perf_counter() - t0)
         _console(line)
         return io.NodeOutput(out, ui=ui.PreviewText(line))

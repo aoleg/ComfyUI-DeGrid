@@ -62,9 +62,13 @@ def _to_image(t: torch.Tensor, mode: str = "RGB") -> Image.Image:
     return Image.fromarray(arr, mode=mode)
 
 
-def infotext(iso, grain, colour_grain, match_texture, film_type) -> str:
+OPTIC_KEYS = (("softness", "soft"), ("halation", "halation"), ("bloom", "bloom"), ("highlight_rolloff", "rolloff"))
+
+
+def infotext(iso, grain, colour_grain, match_texture, film_type, softness=0, halation=0, bloom=0, highlight_rolloff=0) -> str:
     """Compact ``k=v;k=v`` form; no colons or commas so Forge writes it unquoted."""
-    return f"iso={str(iso).replace(' ', '')};grain={float(grain):g};chroma={colour_grain};match={int(bool(match_texture))};film={film_type}"
+    optics = "".join(f";{k}={float(v):g}" for (_, k), v in zip(OPTIC_KEYS, (softness, halation, bloom, highlight_rolloff)))
+    return f"iso={str(iso).replace(' ', '')};grain={float(grain):g};chroma={colour_grain};match={int(bool(match_texture))};film={film_type}{optics}"
 
 
 def parse_infotext(text: str | None) -> dict[str, str] | None:
@@ -93,6 +97,19 @@ def _paste(name: str, cast):
             return None
 
     return read
+
+
+def _paste_optic(name: str):
+    """An optical stage missing from a written infotext was off (older images): 0, not 'keep'."""
+    read = _paste(name, float)
+
+    def optic(params: dict):
+        v = read(params)
+        if v is None and _paste_enabled(params):
+            return 0.0
+        return v
+
+    return optic
 
 
 def _paste_enabled(params: dict):
@@ -137,7 +154,7 @@ class FilmEmulationScript(scripts.Script):
             gr.HTML(
                 "Makes each final image look shot on film, as the last step. <b>Grain</b>: "
                 "<b>ISO</b> sets its character (blob size, clumpiness, colour), never its amount; "
-                "ISO 200 matches the grain the model draws itself when prompted for it. The "
+                "ISO 400 matches the grain the model draws itself when prompted for it. The "
                 "<b>Grain</b> slider sets the amount alone: 1 is invisible, 50 reads as texture "
                 "rather than noise, 100 is a bit noisy, the same on every ISO. Grain is coarser and "
                 "stronger in the shadows; white photo borders get none. Grey stays exactly grey, "
@@ -146,7 +163,7 @@ class FilmEmulationScript(scripts.Script):
             with gr.Row():
                 iso = gr.Dropdown(
                     value=core.ISO_DEFAULT, choices=list(core.ISO_NAMES), label="ISO",
-                    info="grain character, not amount; 100 blends into skin as fine texture, 200 is the model's own grain, 400+ sits on the image as film",
+                    info="grain character, not amount, named after real stock; 100-200 blend into skin as fine texture, 400 is the model's own grain, 800+ sits on the image as film",
                 )
                 grain = gr.Slider(
                     minimum=0, maximum=100, step=1, value=int(core.STRENGTH_DEFAULT), label="Grain",
@@ -165,6 +182,11 @@ class FilmEmulationScript(scripts.Script):
                     choices=list(core.FILM_TYPES), value=core.FILM_DEFAULT, label="Film type",
                     info="print: a print or slide, most grain in the darks; negative: a negative scan, more in the highlights; grain is coarser in the shadows either way",
                 )
+            with gr.Row():
+                softness = gr.Slider(minimum=0, maximum=100, step=1, value=0, label="Softness", info="slightly lower acutance than a digital render; 0 = off")
+                halation = gr.Slider(minimum=0, maximum=100, step=1, value=0, label="Halation", info="red-orange glow around light sources; neutral on monochrome; 0 = off")
+                bloom = gr.Slider(minimum=0, maximum=100, step=1, value=0, label="Bloom", info="soft glow around highlights in their own colour; 0 = off")
+                highlight_rolloff = gr.Slider(minimum=0, maximum=100, step=1, value=0, label="Highlight roll-off", info="a film shoulder instead of a hard clip; white lands near 237/255 at 25, 226 at 50, 214 at 100; 0 = off")
 
         self.infotext_fields = [
             PasteField(enabled, _paste_enabled),
@@ -173,17 +195,21 @@ class FilmEmulationScript(scripts.Script):
             PasteField(colour_grain, _paste("chroma", str)),
             PasteField(match_texture, _paste("match", _paste_bool)),
             PasteField(film_type, _paste("film", str)),
+            PasteField(softness, _paste_optic("soft")),
+            PasteField(halation, _paste_optic("halation")),
+            PasteField(bloom, _paste_optic("bloom")),
+            PasteField(highlight_rolloff, _paste_optic("rolloff")),
         ]
         # Positional order == the hooks' parameter order.
-        return [enabled, iso, grain, colour_grain, match_texture, film_type]
+        return [enabled, iso, grain, colour_grain, match_texture, film_type, softness, halation, bloom, highlight_rolloff]
 
-    def process(self, p, enabled, iso, grain, colour_grain, match_texture, film_type, **kwargs):
+    def process(self, p, enabled, iso, grain, colour_grain, match_texture, film_type, softness, halation, bloom, highlight_rolloff, **kwargs):
         if not enabled:
             return
-        p.extra_generation_params[INFOTEXT_KEY] = infotext(iso, grain, colour_grain, match_texture, film_type)
+        p.extra_generation_params[INFOTEXT_KEY] = infotext(iso, grain, colour_grain, match_texture, film_type, softness, halation, bloom, highlight_rolloff)
 
     @torch.inference_mode()
-    def postprocess_image_after_composite(self, p, pp, enabled, iso, grain, colour_grain, match_texture, film_type, **kwargs):
+    def postprocess_image_after_composite(self, p, pp, enabled, iso, grain, colour_grain, match_texture, film_type, softness, halation, bloom, highlight_rolloff, **kwargs):
         if not enabled:
             return
         image = getattr(pp, "image", None)
@@ -199,7 +225,10 @@ class FilmEmulationScript(scripts.Script):
         x, mode = _to_tensor(image)
         work = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         t0 = time.perf_counter()
-        out, stats = core.add_grain(x, iso=iso, strength=float(grain), seed=seed, chroma=colour_grain, match_texture=bool(match_texture), film=film_type, work_device=work)
+        out, stats = core.emulate(
+            x, iso=iso, grain=float(grain), seed=seed, chroma=colour_grain, match_texture=bool(match_texture), film=film_type,
+            softness=float(softness), halation=float(halation), bloom=float(bloom), rolloff=float(highlight_rolloff), work_device=work,
+        )
         line = core.status_line(stats, seconds=time.perf_counter() - t0)
 
         logger.info(_ascii(f"Film emulation: {image.width}x{image.height} [{index + 1}] | {line}"))
@@ -207,7 +236,7 @@ class FilmEmulationScript(scripts.Script):
         pp.image = _to_image(out, mode)
 
 
-_UI_PARAMS = ["enabled", "iso", "grain", "colour_grain", "match_texture", "film_type"]
+_UI_PARAMS = ["enabled", "iso", "grain", "colour_grain", "match_texture", "film_type", "softness", "halation", "bloom", "highlight_rolloff"]
 for _hook in (FilmEmulationScript.process, FilmEmulationScript.postprocess_image_after_composite):
     _params = [n for n in inspect.signature(_hook).parameters if n not in ("self", "p", "pp", "kwargs")]
     assert _params == _UI_PARAMS, (_hook.__name__, _params)

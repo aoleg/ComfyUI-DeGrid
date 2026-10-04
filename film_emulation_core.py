@@ -1,7 +1,12 @@
 """Pure-torch core for optional film emulation, the last stage of the pipeline.
 
-Film emulation makes a finished render look shot on film. Its stage today is
-film grain (``add_grain``), described below.
+Film emulation makes a finished render look shot on film. ``emulate`` runs the
+stages in the order light meets them: the optical stages (``optics``: softness,
+halation, bloom, all in linear light, then the highlight roll-off), then film
+grain (``add_grain``), which sits in the emulsion and so comes last. Each
+optical stage has a strength 0..100, 0 = off. A detected white photo border is
+left out of every stage: the optics run on the picture rectangle only, so paper
+never glows into the picture. Grain is described below.
 
 No ComfyUI / Forge imports, so the same file drives every host and the offline
 tests. The three image helpers are copied from vae_enhance_core.py on purpose:
@@ -77,8 +82,8 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-ISO_NAMES = ("ISO 100", "ISO 200", "ISO 400", "ISO 800", "ISO 1600", "ISO 3200")
-ISO_DEFAULT = "ISO 200"  # the model's own prompted grain measures a lag-one autocorrelation of 0.34 after the 9 px high-pass; ISO 200 measures 0.35
+ISO_NAMES = ("ISO 100", "ISO 200", "ISO 400", "ISO 800", "ISO 1600", "ISO 3200", "ISO 6400")
+ISO_DEFAULT = "ISO 400"  # the model's own prompted grain measures a lag-one autocorrelation of 0.34 after the 9 px high-pass; ISO 400 measures 0.35
 STRENGTH_DEFAULT = 50.0
 CHROMA_MODES = ("auto", "on", "off")
 
@@ -86,19 +91,22 @@ CHROMA_MODES = ("auto", "on", "off")
 # tail: cubic term that makes the amplitude distribution clumpy (kurtosis > 3);
 # chroma: fraction of the amplitude that goes into colour grain on saturated pixels.
 # Calibrated 2026-10-03 (knowledge_degrid.md §8.12): sigma against the model's own prompted
-# grain (lag-one autocorrelation 0.34 after a 9 px high-pass; ISO 200 measures 0.35 and is the
+# grain (lag-one autocorrelation 0.34 after a 9 px high-pass; ISO 400 measures 0.35 and is the
 # default, confirmed by eye on a smooth-skin portrait at strength 50); tail against kurtosis 3.0
-# at ISO 100 rising to ~4.2 at ISO 3200 (x + t·x³ on a Gaussian field: t 0.01 -> 3.26,
-# 0.02 -> 3.54, 0.03 -> 3.85, 0.04 -> ~4.2). At equal amplitude the presets differ in kind, not
-# in visibility (CSF-weighted factors 1.00-1.16): ISO 100 blends into skin as fine texture,
-# ISO 400 and up read as clumps sitting on it.
+# at ISO 200 rising to ~4.2 at ISO 6400 (x + t·x³ on a Gaussian field: t 0.01 -> 3.26,
+# 0.02 -> 3.54, 0.03 -> 3.85, 0.04 -> ~4.2). Named against real stock on 2026-10-04: the look
+# first shipped as ISO 200 is ISO 400 on cheap film (ISO 800 on expensive film), so every preset
+# moved up one stop and ISO 100 was extrapolated (sigma x 0.8, not judged by eye). At equal
+# amplitude the presets differ in kind, not in visibility: ISO 100-200 blend into skin as fine
+# texture, ISO 800 and up read as clumps sitting on it.
 ISO_PRESETS: dict[str, dict[str, float]] = {
-    "ISO 100": {"sigma": 0.40, "tail": 0.000, "chroma": 0.05},
-    "ISO 200": {"sigma": 0.50, "tail": 0.005, "chroma": 0.08},
-    "ISO 400": {"sigma": 0.60, "tail": 0.010, "chroma": 0.12},
-    "ISO 800": {"sigma": 0.75, "tail": 0.020, "chroma": 0.18},
-    "ISO 1600": {"sigma": 0.95, "tail": 0.030, "chroma": 0.25},
-    "ISO 3200": {"sigma": 1.20, "tail": 0.040, "chroma": 0.35},
+    "ISO 100": {"sigma": 0.32, "tail": 0.000, "chroma": 0.03},
+    "ISO 200": {"sigma": 0.40, "tail": 0.000, "chroma": 0.05},
+    "ISO 400": {"sigma": 0.50, "tail": 0.005, "chroma": 0.08},
+    "ISO 800": {"sigma": 0.60, "tail": 0.010, "chroma": 0.12},
+    "ISO 1600": {"sigma": 0.75, "tail": 0.020, "chroma": 0.18},
+    "ISO 3200": {"sigma": 0.95, "tail": 0.030, "chroma": 0.25},
+    "ISO 6400": {"sigma": 1.20, "tail": 0.040, "chroma": 0.35},
 }
 SCALE_REF = 1536  # px long side at which the preset sigmas apply
 SIGMA_SCALE_EXP = 0.5  # sigma ~ (long side / SCALE_REF) ** this; 1 = frame-anchored, 0 = pixel-anchored
@@ -118,11 +126,12 @@ CHROMA_REF_255 = 40.0  # saturation at which the colour grain's std equals chrom
 MONO_THRESHOLD_255 = 8.0  # frame mean chroma magnitude below this = monochrome (a Krea 2 "B&W" decode carries ~5.6 of tint; colour photos 20+)
 
 # Per-ISO loudness: coarse, clumpy grain reads louder than its amplitude, so every preset gives
-# the same perceived amount at one strength. Multiplies the amplitude. ISO 100, 800 and 3200
-# were matched by eye against ISO 200 on a B&W portrait (strength 50 and 100); they follow
-# about (0.5 / sigma) ** 0.5. ISO 400 and 1600 are interpolated in log sigma.
+# the same perceived amount at one strength. Multiplies the amplitude. ISO 200, 1600 and 6400
+# were matched by eye against ISO 400 on a B&W portrait (strength 50 and 100); they follow
+# about (0.5 / sigma) ** 0.5. ISO 800 and 3200 are interpolated in log sigma, ISO 100 follows
+# the rule.
 ISO_LOUDNESS: dict[str, float] = {
-    "ISO 100": 1.15, "ISO 200": 1.0, "ISO 400": 0.9, "ISO 800": 0.8, "ISO 1600": 0.72, "ISO 3200": 0.65,
+    "ISO 100": 1.25, "ISO 200": 1.15, "ISO 400": 1.0, "ISO 800": 0.9, "ISO 1600": 0.8, "ISO 3200": 0.72, "ISO 6400": 0.65,
 }
 
 FILM_TYPES = ("print", "negative")
@@ -157,6 +166,25 @@ FRAME_SEARCH = 0.03
 FRAME_MIN = 0.012
 FRAME_PAPER_SPREAD_255 = 18.0
 FRAME_FEATHER = 3  # px of soft edge inside the picture rectangle
+# Optical stages. Glow radii are fractions of the picture's long side (a halo belongs to
+# the picture, not the pixel grid); softness scales like grain (judged at 1:1).
+SOFT_SIGMA = 1.0  # px at SCALE_REF; strength 100 = the full Gaussian, lower = a blend toward it
+# Scales: 50 is the look the user picked (2026-10-04), 100 twice as much. The first guesses
+# (halation gain 1, radius 0.4-1.2 %; bloom gain 0.6, 1.5-5 %; roll-off knee 0.7) changed the
+# pixels but could not be seen: renders already draw a glow around their lights, and a glow
+# no wider or redder than that one, or a shoulder above sRGB 0.85, reads as the same picture.
+HALATION_SIGMAS, HALATION_WEIGHTS = (0.006, 0.02), (0.5, 0.5)
+HALATION_KNEE = 0.5  # linear max(luminance, red) where a highlight starts to halate
+HALATION_TINT = (1.0, 0.18, 0.04)  # linear RGB: the red-sensitive layer lies next to the film base
+HALATION_MAX = 2.0  # glow gain at strength 100 (4.0 put the user's preferred look at 25)
+BLOOM_SIGMAS, BLOOM_WEIGHTS = (0.02, 0.08), (0.5, 0.5)
+BLOOM_KNEE = 0.3  # linear max channel
+BLOOM_MAX = 1.0  # 2.0 put the user's preferred look at 25
+ROLLOFF_KNEE = 0.45  # linear max channel where the shoulder starts (sRGB 0.70)
+ROLLOFF_MAX = 1.5  # shoulder bend at strength 100 (3.0 put the user's preferred look at 25): input white lands at knee + (1 - knee) / (1 + this)
+WIDE_BLUR_PX = 8.0  # blurs wider than this run on a downsampled copy, blurred by at least this much there
+OPTICS = ("softness", "halation", "bloom", "rolloff")
+_LUMA_LIN = (0.2126, 0.7152, 0.0722)
 _LUMA = (0.299, 0.587, 0.114)
 _BELL_A, _BELL_B = 0.5, 0.8  # luminance weight = L^a (1-L)^b, normalised to 1 at its peak
 
@@ -190,6 +218,92 @@ def gaussian_blur(x_bchw: torch.Tensor, sigma: float) -> torch.Tensor:
     y = F.conv2d(y, k.view(1, 1, 1, -1).repeat(c, 1, 1, 1), groups=c)
     y = F.conv2d(y, k.view(1, 1, -1, 1).repeat(c, 1, 1, 1), groups=c)
     return y
+
+
+def srgb_to_linear(x: torch.Tensor) -> torch.Tensor:
+    return torch.where(x <= 0.04045, x / 12.92, ((x.clamp(min=0.0) + 0.055) / 1.055) ** 2.4)
+
+
+def linear_to_srgb(x: torch.Tensor) -> torch.Tensor:
+    x = x.clamp(0.0, 1.0)
+    return torch.where(x <= 0.0031308, x * 12.92, 1.055 * x ** (1.0 / 2.4) - 0.055)
+
+
+def wide_blur(x_bchw: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Gaussian blur; a wide one runs on an area-downsampled copy and is upsampled back."""
+    if sigma <= WIDE_BLUR_PX:
+        return gaussian_blur(x_bchw, sigma)
+    # The copy must stay blurred by several of its own pixels and come back with a smooth
+    # (bicubic) upsample: a 28x shrink with a bilinear upsample left visible facets, contour
+    # bands on a dark sky.
+    h, w = x_bchw.shape[-2:]
+    f = max(1, int(sigma // WIDE_BLUR_PX))
+    small = F.adaptive_avg_pool2d(x_bchw, (max(1, -(-h // f)), max(1, -(-w // f))))
+    small = gaussian_blur(small, sigma / f)
+    return F.interpolate(small, size=(h, w), mode="bicubic", align_corners=False).clamp(min=0.0)
+
+
+def _smoothstep(lo: float, hi: float, x: torch.Tensor) -> torch.Tensor:
+    t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _amount(strength: float) -> float:
+    return max(0.0, min(100.0, float(strength))) / 100.0
+
+
+def optics(
+    x_bchw: torch.Tensor,
+    softness: float = 0.0,
+    halation: float = 0.0,
+    bloom: float = 0.0,
+    rolloff: float = 0.0,
+    monochrome: bool = False,
+    scale_ref: int = SCALE_REF,
+) -> torch.Tensor:
+    """The optical stages on a picture (no border), sRGB in and out, [B, 3, H, W].
+
+    softness: blend toward a SOFT_SIGMA Gaussian, the lower acutance of a lens and an
+    emulsion. halation: light reflected off the film base back into the red layer, a
+    red-orange glow around highlights (neutral on monochrome images). bloom: a wide glow
+    in the highlight's own colour. Both add only the glow in excess of the local source,
+    max(glow - source, 0): a uniform bright area gets nothing, a light source is not
+    dimmed, and the dark surroundings get the full glow. rolloff: a soft
+    shoulder on the brightest channel (hue kept), which also takes the light the glows
+    add above white. All in linear light; stages at 0 are skipped.
+    """
+    a_soft, a_hal, a_bloom, a_roll = (_amount(v) for v in (softness, halation, bloom, rolloff))
+    if a_soft == a_hal == a_bloom == a_roll == 0.0:
+        return x_bchw
+    h, w = x_bchw.shape[-2:]
+    long_side = max(h, w)
+    lin = srgb_to_linear(x_bchw)
+    if a_soft > 0:
+        sigma = SOFT_SIGMA * (long_side / scale_ref) ** SIGMA_SCALE_EXP
+        lin = lin + a_soft * (gaussian_blur(lin, sigma) - lin)
+    if a_hal > 0 or a_bloom > 0:
+        wl = torch.tensor(_LUMA_LIN, dtype=lin.dtype, device=lin.device).view(1, 3, 1, 1)
+        Y = (lin * wl).sum(1, keepdim=True)
+        add = torch.zeros_like(lin)
+        if a_hal > 0:
+            key = _smoothstep(HALATION_KNEE, 1.0, torch.maximum(Y, lin[:, :1]))  # red light reaches the red layer best
+            glow = sum(wt * wide_blur(key, sg * long_side) for sg, wt in zip(HALATION_SIGMAS, HALATION_WEIGHTS))
+            tint = torch.tensor(HALATION_TINT, dtype=lin.dtype, device=lin.device).view(1, 3, 1, 1)
+            if monochrome:
+                tint = (tint * wl).sum(1, keepdim=True).expand(1, 3, 1, 1)
+            add = add + a_hal * HALATION_MAX * (glow - key).clamp(min=0.0) * tint  # only what spills past its source
+        if a_bloom > 0:
+            src = lin * _smoothstep(BLOOM_KNEE, 1.0, lin.amax(1, keepdim=True))  # a saturated light blooms too
+            glow = sum(wt * wide_blur(src, sg * long_side) for sg, wt in zip(BLOOM_SIGMAS, BLOOM_WEIGHTS))
+            add = add + a_bloom * BLOOM_MAX * (glow - src).clamp(min=0.0)  # a bright backdrop does not bloom onto itself
+        lin = lin + add
+    if a_roll > 0:
+        k, bend = ROLLOFF_KNEE, a_roll * ROLLOFF_MAX
+        m = lin.amax(1, keepdim=True)
+        t = ((m - k) / (1.0 - k)).clamp(min=0.0)
+        m2 = torch.where(m > k, k + (1.0 - k) * t / (1.0 + bend * t), m)
+        lin = lin * (m2 / m.clamp(min=1e-6))
+    return linear_to_srgb(lin)
 
 
 # -- the pieces ---------------------------------------------------------------------
@@ -427,8 +541,10 @@ def add_grain(
     frame_detect: bool = True,
     scale_ref: int = SCALE_REF,
     work_device: torch.device | str | None = None,
+    frames: list | None = None,
 ) -> tuple[torch.Tensor, list[dict[str, Any]]]:
-    """Add film grain to an image batch.
+    """Add film grain to an image batch. ``frames``: borders already found, one per image
+    (dict or None), used instead of detecting them again.
 
     image: ``[B, H, W, C]`` float 0..1, C >= 3; channels beyond three pass through.
     Each image in the batch uses ``seed + index`` and, with ``match_texture``, its
@@ -456,7 +572,10 @@ def add_grain(
     for i in range(b):
         xi = x[i : i + 1]
         L, cv, mag = chroma_parts(xi)
-        frame = detect_frame(xi) if frame_detect else None
+        if frames is not None:
+            frame = frames[i]
+        else:
+            frame = detect_frame(xi) if frame_detect else None
         inner = xi
         if frame is not None:
             inner = xi[:, :, frame["top"] : h - frame["bottom"], frame["left"] : w - frame["right"]]
@@ -523,6 +642,50 @@ def add_grain(
     return out.permute(0, 2, 3, 1).contiguous().to(image.device, orig_dtype), stats
 
 
+def emulate(
+    image: torch.Tensor,
+    iso: str = ISO_DEFAULT,
+    grain: float = STRENGTH_DEFAULT,
+    seed: int = 0,
+    chroma: str = "auto",
+    match_texture: bool = True,
+    film: str = FILM_DEFAULT,
+    softness: float = 0.0,
+    halation: float = 0.0,
+    bloom: float = 0.0,
+    rolloff: float = 0.0,
+    frame_detect: bool = True,
+    scale_ref: int = SCALE_REF,
+    work_device: torch.device | str | None = None,
+) -> tuple[torch.Tensor, list[dict[str, Any]]]:
+    """Every stage on an image batch ``[B, H, W, C]``: the optics on each picture
+    rectangle, then grain. Returns ``(out, stats)`` like ``add_grain``, each stats dict
+    with an ``optics`` entry. All optics at 0 gives exactly ``add_grain``'s result."""
+    if image.ndim != 4 or image.shape[-1] < 3:
+        raise ValueError(f"expected [B, H, W, C>=3], got {tuple(image.shape)}")
+    amounts = {"softness": softness, "halation": halation, "bloom": bloom, "rolloff": rolloff}
+    amounts = {k: max(0.0, min(100.0, float(v))) for k, v in amounts.items()}
+    dev = torch.device(work_device) if work_device is not None else image.device
+    x = image.to(dev).float().permute(0, 3, 1, 2).contiguous()
+    b, _, h, w = x.shape
+    frames = [detect_frame(x[i : i + 1, :3]) if frame_detect else None for i in range(b)]
+    if any(v > 0 for v in amounts.values()):
+        x = x.clone()
+        for i, fr in enumerate(frames):
+            t, bt, l, r = (fr["top"], fr["bottom"], fr["left"], fr["right"]) if fr else (0, 0, 0, 0)
+            pic = x[i : i + 1, :3, t : h - bt, l : w - r]
+            mono, _ = is_monochrome(pic)
+            x[i : i + 1, :3, t : h - bt, l : w - r] = optics(pic, monochrome=mono, scale_ref=scale_ref, **amounts)
+    staged = x.permute(0, 2, 3, 1)
+    out, stats = add_grain(
+        staged, iso=iso, strength=grain, seed=seed, chroma=chroma, match_texture=match_texture, film=film,
+        frame_detect=frame_detect, scale_ref=scale_ref, frames=frames,
+    )
+    for st in stats:
+        st["optics"] = dict(amounts)
+    return out.to(image.device, image.dtype), stats
+
+
 def status_line(stats: list, seconds: float | None = None) -> str:
     """One-line verdict shared by the front ends. No colons or commas: Forge JSON-quotes
     any infotext value containing either."""
@@ -533,18 +696,25 @@ def status_line(stats: list, seconds: float | None = None) -> str:
         "on": f"colour grain {s['chroma_frac'] * 100:.0f}%",
         "auto": f"colour grain {s['chroma_frac'] * 100:.0f}%",
     }[s["chroma_mode"]]
-    parts = [
-        f"grain {s['iso']} strength {s['strength']:g}",
-        f"{s['amp_255']:.1f}/255 midtone (measured {s['midtone_std_255']:.1f})",
-    ]
-    if s.get("match_texture"):
-        parts.append(f"x{s['texture_factor']:.2f} for texture floor {s['floor_255']:.2f}/255")
-    parts += [
-        f"blob {s['sigma_highlight_px']:.2f}-{s['sigma_shadow_px']:.2f} px",
-        chroma_txt,
-    ]
-    if s.get("film") == "negative":
-        parts.append("negative scan")
+    if s["strength"] > 0:
+        parts = [
+            f"grain {s['iso']} strength {s['strength']:g}",
+            f"{s['amp_255']:.1f}/255 midtone (measured {s['midtone_std_255']:.1f})",
+        ]
+        if s.get("match_texture"):
+            parts.append(f"x{s['texture_factor']:.2f} for texture floor {s['floor_255']:.2f}/255")
+        parts += [
+            f"blob {s['sigma_highlight_px']:.2f}-{s['sigma_shadow_px']:.2f} px",
+            chroma_txt,
+        ]
+        if s.get("film") == "negative":
+            parts.append("negative scan")
+    else:
+        parts = ["grain off"]
+    names = {"softness": "softness", "halation": "halation", "bloom": "bloom", "rolloff": "roll-off"}
+    on = [f"{names[k]} {v:g}" for k, v in (s.get("optics") or {}).items() if v > 0]
+    if on:
+        parts.append(" ".join(on))
     fr = s.get("frame")
     if fr:
         parts.append(f"frame excluded {fr['top']}/{fr['bottom']}/{fr['left']}/{fr['right']} px")
