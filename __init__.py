@@ -8,7 +8,7 @@ from comfy_api.latest import ComfyExtension, io, ui
 
 from .degrid_core import NEGLIGIBLE_AMP, degrid, extract_grid, lattice_amp, status_line
 from . import vae_enhance_core as enhance_core
-from . import film_grain_core as grain_core
+from . import film_emulation_core as film_core
 
 DEFAULT_THRESHOLD_255 = round(NEGLIGIBLE_AMP * 255.0, 2)  # 0.5
 
@@ -269,46 +269,47 @@ class VAEEnhance(io.ComfyNode):
         return io.NodeOutput(out, mask, ui=ui.PreviewText(line))
 
 
-class FilmGrain(io.ComfyNode):
+class FilmEmulation(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="FilmGrain",
-            display_name="Film Grain",
+            node_id="FilmEmulation",
+            display_name="Film Emulation",
             category="image/postprocessing",
             description=(
-                "Adds film grain as the LAST step before saving: a seeded, spatially "
-                "correlated, midtone-weighted noise field. Anything after it (a resize, an "
-                "upscaler, a re-encode) resamples the grain into blobs, so wire it directly "
-                "into Save.\n\n"
-                "iso sets the grain's character (blob size, clumpiness, colour), never its "
-                "amount; ISO 200 matches the grain Krea 2 draws itself when prompted for it. "
-                "strength sets the amount alone, in the same units on every image: 1 is "
-                "under the eye's threshold, 50 reads as texture rather than noise (the "
-                "picture looks more detailed, not noisier), 100 is a bit noisy.\n\n"
+                "Makes the image look shot on film, as the LAST step before saving. Anything "
+                "after it (a resize, an upscaler, a re-encode) resamples the grain into blobs, "
+                "so wire it directly into Save.\n\n"
+                "Grain: a seeded, spatially correlated noise field, coarser and stronger in the "
+                "shadows, none on white photo borders. iso sets the grain's character (blob "
+                "size, clumpiness, colour), never its amount; ISO 200 matches the grain Krea 2 "
+                "draws itself when prompted for it. grain sets the amount alone, the same on "
+                "every image and every ISO: 0 is off, 1 is under the eye's threshold, 50 reads "
+                "as texture rather than noise (the picture looks more detailed, not noisier), "
+                "100 is a bit noisy.\n\n"
                 "Grey stays exactly grey: luma grain is identical on R, G and B. Colour grain "
                 "only ever varies the colour a pixel already has, never adds a hue, and is "
                 "switched off automatically on monochrome images. Judge the result at 100%."
             ),
-            search_aliases=["film grain", "grain", "noise", "analog", "iso"],
+            search_aliases=["film grain", "film emulation", "grain", "noise", "analog", "iso"],
             inputs=[
                 io.Image.Input("image", tooltip="The finished image. This should be the last node before Save."),
                 io.Boolean.Input("enabled", default=True, tooltip="Off = the image passes through completely untouched."),
                 io.Combo.Input(
-                    "iso", options=list(grain_core.ISO_NAMES), default=grain_core.ISO_DEFAULT,
+                    "iso", options=list(film_core.ISO_NAMES), default=film_core.ISO_DEFAULT,
                     tooltip="Grain character, not amount. ISO 100: near-white, blends into skin as fine "
                             "texture. ISO 200 (default): the model's own grain. ISO 400 and up: larger, "
                             "clumpier blobs that sit on the image like film at that speed, with more "
                             "colour grain on saturated colours.",
                 ),
                 io.Float.Input(
-                    "strength", default=grain_core.STRENGTH_DEFAULT, min=0.0, max=100.0, step=1.0,
-                    tooltip="Midtone amplitude: 1 = 0.3/255 (invisible), 50 = 3.3/255 (at the midtone "
-                            "visibility threshold: texture, not noise), 100 = 8/255 (grainy). "
-                            "Highlights and shadows get less.",
+                    "grain", default=film_core.STRENGTH_DEFAULT, min=0.0, max=100.0, step=1.0,
+                    tooltip="Grain amount at midtones: 0 = off, 1 = 0.3/255 (invisible), 50 = 3.3/255 "
+                            "(at the midtone visibility threshold: texture, not noise), 100 = 8/255 "
+                            "(grainy). film_type sets how much the other tones get.",
                 ),
                 io.Combo.Input(
-                    "colour_grain", options=list(grain_core.CHROMA_MODES), default="auto",
+                    "colour_grain", options=list(film_core.CHROMA_MODES), default="auto",
                     tooltip="auto: colour grain on saturated colours of colour images, none on monochrome "
                             "images (mean chroma under 8/255). off: luma grain only, always. on: colour "
                             "grain even on a faintly tinted frame (it still only varies the tint).",
@@ -318,11 +319,11 @@ class FilmGrain(io.ComfyNode):
                     tooltip="Keep the visible amount of grain the same on every image. Texture an image "
                             "already has hides part of the grain added to it, so a textured or already "
                             "grainy image gets more (up to 1.4x) to show as much grain as a clean one. A "
-                            "clean render gets exactly the strength's amount. Never reduces it. Off = the "
-                            "strength's amount on every image.",
+                            "clean render gets exactly the grain setting's amount. Never reduces it. Off = "
+                            "that amount on every image.",
                 ),
                 io.Combo.Input(
-                    "film_type", options=list(grain_core.FILM_TYPES), default=grain_core.FILM_DEFAULT,
+                    "film_type", options=list(film_core.FILM_TYPES), default=film_core.FILM_DEFAULT,
                     tooltip="Where the grain shows most. print (default): a print or a reversal slide, "
                             "most grain in the darks, less in the mids, little in the brights, none on "
                             "pure black or white. negative: a negative scan, more grain in the "
@@ -333,16 +334,16 @@ class FilmGrain(io.ComfyNode):
                     tooltip="Grain pattern seed. Each image in a batch uses seed + its index.",
                 ),
             ],
-            outputs=[io.Image.Output("grained", display_name="image", tooltip="The image with grain, same size as the input.")],
+            outputs=[io.Image.Output("film", display_name="image", tooltip="The film-emulated image, same size as the input.")],
         )
 
     @classmethod
-    def execute(cls, image, enabled, iso, strength, colour_grain, match_texture, film_type, seed):
+    def execute(cls, image, enabled, iso, grain, colour_grain, match_texture, film_type, seed):
         if not enabled:
             return io.NodeOutput(image, ui=ui.PreviewText("bypassed (enabled = off)"))
         t0 = time.perf_counter()
-        out, stats = grain_core.add_grain(image, iso=iso, strength=float(strength), seed=int(seed), chroma=colour_grain, match_texture=bool(match_texture), film=film_type)
-        line = grain_core.status_line(stats, seconds=time.perf_counter() - t0)
+        out, stats = film_core.add_grain(image, iso=iso, strength=float(grain), seed=int(seed), chroma=colour_grain, match_texture=bool(match_texture), film=film_type)
+        line = film_core.status_line(stats, seconds=time.perf_counter() - t0)
         _console(line)
         return io.NodeOutput(out, ui=ui.PreviewText(line))
 
@@ -350,7 +351,7 @@ class FilmGrain(io.ComfyNode):
 class DeGridExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [VAEDeGrid, VAEEnhance, FilmGrain]
+        return [VAEDeGrid, VAEEnhance, FilmEmulation]
 
 
 async def comfy_entrypoint() -> DeGridExtension:

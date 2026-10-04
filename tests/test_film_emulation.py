@@ -1,4 +1,4 @@
-"""Offline tests for film_grain_core.py.
+"""Offline tests for film_emulation_core.py.
 
     python -m unittest discover -s tests -v
 
@@ -19,9 +19,9 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import forge_stubs as stubs  # noqa: E402
 
-from lib_degrid.loader import load_grain_core  # noqa: E402
+from lib_degrid.loader import load_film_core  # noqa: E402
 
-fg = load_grain_core(str(stubs.REPO_ROOT))
+fg = load_film_core(str(stubs.REPO_ROOT))
 
 
 def flat(value: float, h: int = 512, w: int = 512, rgb=None) -> torch.Tensor:

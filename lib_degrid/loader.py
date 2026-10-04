@@ -19,8 +19,8 @@ import sys
 
 _CORE_FILE = "degrid_core.py"
 _ENHANCE_FILE = "vae_enhance_core.py"
-_GRAIN_FILE = "film_grain_core.py"
-_MODULE_NAMES = {_CORE_FILE: "comfyui_degrid_core", _ENHANCE_FILE: "comfyui_degrid_enhance_core", _GRAIN_FILE: "comfyui_degrid_grain_core"}
+_FILM_FILE = "film_emulation_core.py"
+_MODULE_NAMES = {_CORE_FILE: "comfyui_degrid_core", _ENHANCE_FILE: "comfyui_degrid_enhance_core", _FILM_FILE: "comfyui_degrid_film_core"}
 _cache: dict[str, tuple[tuple, object]] = {}  # file name -> (stamp, module)
 
 
@@ -64,6 +64,6 @@ def load_enhance_core(extension_root: str):
     return _load(extension_root, _ENHANCE_FILE)
 
 
-def load_grain_core(extension_root: str):
-    """Same for film_grain_core.py (the optional film grain stage)."""
-    return _load(extension_root, _GRAIN_FILE)
+def load_film_core(extension_root: str):
+    """Same for film_emulation_core.py (the optional film emulation stage)."""
+    return _load(extension_root, _FILM_FILE)

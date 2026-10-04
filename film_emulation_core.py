@@ -1,4 +1,7 @@
-"""Pure-torch core for optional film grain, the last stage of the pipeline.
+"""Pure-torch core for optional film emulation, the last stage of the pipeline.
+
+Film emulation makes a finished render look shot on film. Its stage today is
+film grain (``add_grain``), described below.
 
 No ComfyUI / Forge imports, so the same file drives every host and the offline
 tests. The three image helpers are copied from vae_enhance_core.py on purpose:

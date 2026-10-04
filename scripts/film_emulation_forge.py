@@ -1,9 +1,9 @@
-"""Film grain for Forge Neo (sd-webui-forge-classic, neo branch).
+"""Film emulation for Forge Neo (sd-webui-forge-classic, neo branch).
 
-Optional, off by default, the last stage of the pipeline: a seeded, spatially
-correlated, midtone-weighted noise field on each final image. Same maths as the
-ComfyUI node in this repo; ``film_grain_core.py`` at the extension root is
-loaded as-is.
+Optional, off by default, the last stage of the pipeline. Its stage today is
+film grain: a seeded, spatially correlated noise field on each final image,
+coarser and stronger in the shadows. Same maths as the ComfyUI node in this
+repo; ``film_emulation_core.py`` at the extension root is loaded as-is.
 
 Integration: ``postprocess_image_after_composite``, once per final image, with
 ``sorting_priority = 30`` so it runs after VAE DeGrid (10) and VAE Enhance (20).
@@ -13,6 +13,9 @@ to the pixels. It does not depend on either other accordion being enabled.
 
 The seed is the image's own generation seed (``p.all_seeds[index]``), so a batch
 gets different grain per image and a re-run gives the same grain.
+
+Images made before the rename carry ``Film grain: iso=...;strength=...``; the
+paste fields read that too, so they restore into this accordion.
 """
 
 from __future__ import annotations
@@ -30,12 +33,14 @@ from modules.infotext_utils import PasteField
 from modules.processing import logger
 from modules.ui_components import InputAccordion
 
-from lib_degrid.loader import load_grain_core
+from lib_degrid.loader import load_film_core
 
 _EXTENSION_ROOT = scripts.basedir()
 
-INFOTEXT_KEY = "Film grain"
-INFOTEXT_RESULT_KEY = "Film grain result"
+INFOTEXT_KEY = "Film emulation"
+INFOTEXT_RESULT_KEY = "Film emulation result"
+LEGACY_INFOTEXT_KEY = "Film grain"  # before the rename; "strength" there is "grain" here
+_LEGACY_NAMES = {"grain": "strength"}
 
 
 def _ascii(text: str) -> str:
@@ -57,9 +62,9 @@ def _to_image(t: torch.Tensor, mode: str = "RGB") -> Image.Image:
     return Image.fromarray(arr, mode=mode)
 
 
-def infotext(iso, strength, colour_grain, match_texture, film_type) -> str:
+def infotext(iso, grain, colour_grain, match_texture, film_type) -> str:
     """Compact ``k=v;k=v`` form; no colons or commas so Forge writes it unquoted."""
-    return f"iso={str(iso).replace(' ', '')};strength={float(strength):g};chroma={colour_grain};match={int(bool(match_texture))};film={film_type}"
+    return f"iso={str(iso).replace(' ', '')};grain={float(grain):g};chroma={colour_grain};match={int(bool(match_texture))};film={film_type}"
 
 
 def parse_infotext(text: str | None) -> dict[str, str] | None:
@@ -76,10 +81,14 @@ def parse_infotext(text: str | None) -> dict[str, str] | None:
 def _paste(name: str, cast):
     def read(params: dict):
         parsed = parse_infotext(params.get(INFOTEXT_KEY))
-        if not parsed or name not in parsed:
+        key = name
+        if parsed is None:
+            parsed = parse_infotext(params.get(LEGACY_INFOTEXT_KEY))
+            key = _LEGACY_NAMES.get(name, name)
+        if not parsed or key not in parsed:
             return None
         try:
-            return cast(parsed[name])
+            return cast(parsed[key])
         except (TypeError, ValueError):
             return None
 
@@ -87,7 +96,7 @@ def _paste(name: str, cast):
 
 
 def _paste_enabled(params: dict):
-    return INFOTEXT_KEY in params
+    return INFOTEXT_KEY in params or LEGACY_INFOTEXT_KEY in params
 
 
 def _paste_bool(v: str) -> bool:
@@ -113,34 +122,35 @@ def seed_for(p, index: int) -> int:
         return int(index)
 
 
-class FilmGrainScript(scripts.Script):
-    sorting_priority = 30  # after VAE DeGrid (10) and VAE Enhance (20): grain is the last thing that touches the pixels
+class FilmEmulationScript(scripts.Script):
+    sorting_priority = 30  # after VAE DeGrid (10) and VAE Enhance (20): film emulation is the last thing that touches the pixels
 
     def title(self):
-        return "Film grain"
+        return "Film emulation"
 
     def show(self, is_img2img):
         return scripts.AlwaysVisible
 
     def ui(self, is_img2img):
-        core = load_grain_core(_EXTENSION_ROOT)
+        core = load_film_core(_EXTENSION_ROOT)
         with InputAccordion(False, label=self.title()) as enabled:
             gr.HTML(
-                "Adds film grain to each final image as the last step. <b>ISO</b> sets the grain's "
-                "character (blob size, clumpiness, colour), never its amount; ISO 200 matches the grain "
-                "the model draws itself when prompted for it. <b>Strength</b> sets the amount alone: "
-                "1 is invisible, 50 reads as texture rather than noise, 100 is a bit noisy. Grey stays "
-                "exactly grey, colour grain never adds a hue and is off on monochrome images. "
-                "Judge the result at 100%."
+                "Makes each final image look shot on film, as the last step. <b>Grain</b>: "
+                "<b>ISO</b> sets its character (blob size, clumpiness, colour), never its amount; "
+                "ISO 200 matches the grain the model draws itself when prompted for it. The "
+                "<b>Grain</b> slider sets the amount alone: 1 is invisible, 50 reads as texture "
+                "rather than noise, 100 is a bit noisy, the same on every ISO. Grain is coarser and "
+                "stronger in the shadows; white photo borders get none. Grey stays exactly grey, "
+                "colour grain never adds a hue and is off on monochrome images. Judge the result at 100%."
             )
             with gr.Row():
                 iso = gr.Dropdown(
                     value=core.ISO_DEFAULT, choices=list(core.ISO_NAMES), label="ISO",
                     info="grain character, not amount; 100 blends into skin as fine texture, 200 is the model's own grain, 400+ sits on the image as film",
                 )
-                strength = gr.Slider(
-                    minimum=0, maximum=100, step=1, value=int(core.STRENGTH_DEFAULT), label="Strength",
-                    info="1 = 0.3/255 invisible, 50 = 3.3/255 texture not noise, 100 = 8/255 grainy; highlights and shadows get less",
+                grain = gr.Slider(
+                    minimum=0, maximum=100, step=1, value=int(core.STRENGTH_DEFAULT), label="Grain",
+                    info="0 = off, 1 = 0.3/255 invisible, 50 = 3.3/255 texture not noise, 100 = 8/255 grainy (midtones; the film type sets the other tones)",
                 )
                 colour_grain = gr.Radio(
                     choices=list(core.CHROMA_MODES), value="auto", label="Colour grain",
@@ -149,7 +159,7 @@ class FilmGrainScript(scripts.Script):
             with gr.Row():
                 match_texture = gr.Checkbox(
                     value=True, label="Same visible grain on textured images",
-                    info="textured or already grainy images hide part of the grain, so they get more (up to 1.4x); clean renders get exactly the strength's amount; never less",
+                    info="textured or already grainy images hide part of the grain, so they get more (up to 1.4x); clean renders get exactly the slider's amount; never less",
                 )
                 film_type = gr.Radio(
                     choices=list(core.FILM_TYPES), value=core.FILM_DEFAULT, label="Film type",
@@ -159,27 +169,27 @@ class FilmGrainScript(scripts.Script):
         self.infotext_fields = [
             PasteField(enabled, _paste_enabled),
             PasteField(iso, _paste("iso", _paste_iso)),
-            PasteField(strength, _paste("strength", float)),
+            PasteField(grain, _paste("grain", float)),
             PasteField(colour_grain, _paste("chroma", str)),
             PasteField(match_texture, _paste("match", _paste_bool)),
             PasteField(film_type, _paste("film", str)),
         ]
         # Positional order == the hooks' parameter order.
-        return [enabled, iso, strength, colour_grain, match_texture, film_type]
+        return [enabled, iso, grain, colour_grain, match_texture, film_type]
 
-    def process(self, p, enabled, iso, strength, colour_grain, match_texture, film_type, **kwargs):
+    def process(self, p, enabled, iso, grain, colour_grain, match_texture, film_type, **kwargs):
         if not enabled:
             return
-        p.extra_generation_params[INFOTEXT_KEY] = infotext(iso, strength, colour_grain, match_texture, film_type)
+        p.extra_generation_params[INFOTEXT_KEY] = infotext(iso, grain, colour_grain, match_texture, film_type)
 
     @torch.inference_mode()
-    def postprocess_image_after_composite(self, p, pp, enabled, iso, strength, colour_grain, match_texture, film_type, **kwargs):
+    def postprocess_image_after_composite(self, p, pp, enabled, iso, grain, colour_grain, match_texture, film_type, **kwargs):
         if not enabled:
             return
         image = getattr(pp, "image", None)
         if not isinstance(image, Image.Image):
             return
-        core = load_grain_core(_EXTENSION_ROOT)
+        core = load_film_core(_EXTENSION_ROOT)
         iso = str(iso) if str(iso) in core.ISO_NAMES else core.ISO_DEFAULT
         colour_grain = str(colour_grain) if str(colour_grain) in core.CHROMA_MODES else "auto"
         film_type = str(film_type) if str(film_type) in core.FILM_TYPES else core.FILM_DEFAULT
@@ -189,15 +199,15 @@ class FilmGrainScript(scripts.Script):
         x, mode = _to_tensor(image)
         work = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         t0 = time.perf_counter()
-        out, stats = core.add_grain(x, iso=iso, strength=float(strength), seed=seed, chroma=colour_grain, match_texture=bool(match_texture), film=film_type, work_device=work)
+        out, stats = core.add_grain(x, iso=iso, strength=float(grain), seed=seed, chroma=colour_grain, match_texture=bool(match_texture), film=film_type, work_device=work)
         line = core.status_line(stats, seconds=time.perf_counter() - t0)
 
-        logger.info(_ascii(f"Film grain: {image.width}x{image.height} [{index + 1}] | {line}"))
+        logger.info(_ascii(f"Film emulation: {image.width}x{image.height} [{index + 1}] | {line}"))
         p.extra_generation_params[INFOTEXT_RESULT_KEY] = _ascii(line)
         pp.image = _to_image(out, mode)
 
 
-_UI_PARAMS = ["enabled", "iso", "strength", "colour_grain", "match_texture", "film_type"]
-for _hook in (FilmGrainScript.process, FilmGrainScript.postprocess_image_after_composite):
+_UI_PARAMS = ["enabled", "iso", "grain", "colour_grain", "match_texture", "film_type"]
+for _hook in (FilmEmulationScript.process, FilmEmulationScript.postprocess_image_after_composite):
     _params = [n for n in inspect.signature(_hook).parameters if n not in ("self", "p", "pp", "kwargs")]
     assert _params == _UI_PARAMS, (_hook.__name__, _params)

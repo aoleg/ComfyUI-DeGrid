@@ -1,4 +1,4 @@
-"""Offline tests for the Forge Neo film grain script (hook wiring, parameters, seed, paste round trip)."""
+"""Offline tests for the Forge Neo film emulation script (hook wiring, parameters, seed, paste round trip)."""
 
 from __future__ import annotations
 
@@ -17,10 +17,10 @@ import forge_stubs as stubs  # noqa: E402
 
 stubs.install_fakes()
 
-from lib_degrid.loader import load_grain_core  # noqa: E402
+from lib_degrid.loader import load_film_core  # noqa: E402
 
-fg = load_grain_core(str(stubs.REPO_ROOT))
-script_mod = stubs.load_script_module(stubs.REPO_ROOT / "scripts" / "film_grain_forge.py", "film_grain_forge_under_test")
+fg = load_film_core(str(stubs.REPO_ROOT))
+script_mod = stubs.load_script_module(stubs.REPO_ROOT / "scripts" / "film_emulation_forge.py", "film_emulation_forge_under_test")
 
 H, W = 96, 128
 
@@ -35,11 +35,11 @@ def as_tensor(image: Image.Image) -> torch.Tensor:
 
 
 class ScriptTests(unittest.TestCase):
-    UI_ORDER = ["enabled", "iso", "strength", "colour_grain", "match_texture", "film_type"]
-    DEFAULTS = dict(enabled=False, iso="ISO 200", strength=50, colour_grain="auto", match_texture=True, film_type="print")
+    UI_ORDER = ["enabled", "iso", "grain", "colour_grain", "match_texture", "film_type"]
+    DEFAULTS = dict(enabled=False, iso="ISO 200", grain=50, colour_grain="auto", match_texture=True, film_type="print")
 
     def setUp(self):
-        self.script = script_mod.FilmGrainScript()
+        self.script = script_mod.FilmEmulationScript()
         self.pp_cls = stubs.fake_forge_modules(str(stubs.REPO_ROOT))["modules.scripts"].PostprocessImageArgs
 
     def args(self, **overrides):
@@ -80,11 +80,11 @@ class ScriptTests(unittest.TestCase):
         image = pil_image(fg.MIDTONE_REF)
         pp = self.pp_cls(image, 1)  # second image of the batch
         self.script.process(p, *self.args(enabled=True, match_texture=False))
-        self.assertEqual(p.extra_generation_params[script_mod.INFOTEXT_KEY], "iso=ISO200;strength=50;chroma=auto;match=0;film=print")
+        self.assertEqual(p.extra_generation_params[script_mod.INFOTEXT_KEY], "iso=ISO200;grain=50;chroma=auto;match=0;film=print")
         with self.assertLogs("processing", level="INFO") as logs:
             self.script.postprocess_image_after_composite(p, pp, *self.args(enabled=True, match_texture=False))
         self.assertEqual(len(logs.output), 1)
-        self.assertIn(f"Film grain: {W}x{H} [2]", logs.output[0])
+        self.assertIn(f"Film emulation: {W}x{H} [2]", logs.output[0])
         self.assertIn("seed 8", logs.output[0])
         self.assertTrue(logs.output[0].isascii(), logs.output[0])
         result = p.extra_generation_params[script_mod.INFOTEXT_RESULT_KEY]
@@ -136,16 +136,26 @@ class ScriptTests(unittest.TestCase):
 
     def test_paste_fields(self):
         self.script.ui(False)
-        readers = {name: pf.function for pf, name in zip(self.script.infotext_fields, ["enabled", "iso", "strength", "chroma", "match", "film"])}
-        params = {script_mod.INFOTEXT_KEY: "iso=ISO1600;strength=35;chroma=off;match=0;film=negative"}
+        readers = {name: pf.function for pf, name in zip(self.script.infotext_fields, ["enabled", "iso", "grain", "chroma", "match", "film"])}
+        params = {script_mod.INFOTEXT_KEY: "iso=ISO1600;grain=35;chroma=off;match=0;film=negative"}
         self.assertIs(readers["enabled"](params), True)
         self.assertEqual(readers["iso"](params), "ISO 1600")
-        self.assertAlmostEqual(readers["strength"](params), 35.0)
+        self.assertAlmostEqual(readers["grain"](params), 35.0)
         self.assertEqual(readers["chroma"](params), "off")
         self.assertIs(readers["match"](params), False)
         self.assertEqual(readers["film"](params), "negative")
-        self.assertIsNone(readers["film"]({script_mod.INFOTEXT_KEY: "iso=ISO200;strength=50;chroma=auto;match=1"}))  # older images
-        self.assertIsNone(readers["match"]({script_mod.INFOTEXT_KEY: "iso=ISO200;strength=50;chroma=auto"}))  # images made before the option
+        self.assertIsNone(readers["film"]({script_mod.INFOTEXT_KEY: "iso=ISO200;grain=50;chroma=auto;match=1"}))  # older images
+        # images made before the rename: "Film grain: ...;strength=..." restores into this accordion
+        legacy = {script_mod.LEGACY_INFOTEXT_KEY: "iso=ISO800;strength=65;chroma=on;match=1"}
+        self.assertIs(readers["enabled"](legacy), True)
+        self.assertEqual(readers["iso"](legacy), "ISO 800")
+        self.assertAlmostEqual(readers["grain"](legacy), 65.0)
+        self.assertEqual(readers["chroma"](legacy), "on")
+        self.assertIs(readers["match"](legacy), True)
+        self.assertIsNone(readers["film"](legacy))  # the old stage had no film type: keep the default
+        self.assertIsNone(readers["match"]({script_mod.LEGACY_INFOTEXT_KEY: "iso=ISO200;strength=50;chroma=auto"}))  # before match_texture
+        both = dict(legacy, **params)  # the new key wins
+        self.assertAlmostEqual(readers["grain"](both), 35.0)
         self.assertIs(readers["enabled"]({}), False)
         self.assertIsNone(readers["iso"]({}))
         self.assertIsNone(script_mod.parse_infotext("garbage"))
