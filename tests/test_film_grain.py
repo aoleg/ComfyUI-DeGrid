@@ -121,24 +121,30 @@ class FieldTests(unittest.TestCase):
 
 class GrainTests(unittest.TestCase):
     def test_midtone_amplitude_matches_strength(self):
-        x = flat(0.38)  # at the bell's peak
+        x = flat(fg.MIDTONE_REF)  # where strength is defined
         for s, expect in ((1, 0.3), (50, 3.3), (100, 8.0)):
-            out, st = fg.add_grain(x, "ISO 400", s, seed=1, match_texture=False)
+            out, st = fg.add_grain(x, "ISO 200", s, seed=1, match_texture=False)  # loudness 1
             d = luma_np(out) - luma_np(x)
             self.assertAlmostEqual(float(d.std()), expect, delta=expect * 0.08 + 0.05, msg=s)
             self.assertAlmostEqual(st[0]["midtone_std_255"], float(d.std()), delta=0.05)
             self.assertEqual(st[0]["chroma_mode"], "monochrome")  # a grey card is monochrome
-        self.assertAlmostEqual(st[0]["sigma_px"], fg.ISO_PRESETS["ISO 400"]["sigma"] * (512 / fg.SCALE_REF) ** 0.5)
+        self.assertAlmostEqual(st[0]["sigma_px"], fg.ISO_PRESETS["ISO 200"]["sigma"] * (512 / fg.SCALE_REF) ** 0.5)
         self.assertIsNone(st[0]["floor_255"])
         self.assertEqual(st[0]["texture_factor"], 1.0)
 
-    def test_black_and_white_get_almost_nothing(self):
-        for v in (0.0, 0.02, 0.98, 1.0):
+    def test_black_white_and_headroom(self):
+        for v in (0.0, 1.0):  # pure black and pure white: nothing
             out, _ = fg.add_grain(flat(v), "ISO 400", 100, seed=1)
+            self.assertEqual(float((out - flat(v)).abs().max()), 0.0, v)
+        # near black: grain, but never more than the headroom (half the distance to black + 1/255)
+        for v in (0.01, 0.02, 0.04):
+            out, _ = fg.add_grain(flat(v), "ISO 3200", 100, seed=1, match_texture=False)
             d = luma_np(out) - luma_np(flat(v))
-            self.assertLess(float(d.std()), 8.0 * 0.4, v)
-        out, _ = fg.add_grain(flat(0.0), "ISO 400", 100, seed=1)
-        self.assertEqual(float((out - flat(0.0)).abs().max()), 0.0)  # black stays black
+            self.assertLess(float(d.std()), (fg.HEADROOM * v * 255 + 1.0) * 1.05, v)
+            self.assertGreater(float(d.std()), 0.2, v)
+        # near white: the print curve is 0 from 0.95
+        out, _ = fg.add_grain(flat(0.97), "ISO 400", 100, seed=1, match_texture=False)
+        self.assertLess(float((luma_np(out) - luma_np(flat(0.97))).std()), 0.3)
 
     def test_grey_stays_exactly_grey(self):
         x = flat(0.4)
@@ -204,17 +210,28 @@ class GrainTests(unittest.TestCase):
         self.assertTrue(torch.equal(out0, x))
         self.assertEqual(st0[0]["amp_255"], 0.0)
 
+    def test_equal_loudness_across_iso(self):
+        x = flat(fg.MIDTONE_REF)
+        def std(iso):
+            out, _ = fg.add_grain(x, iso, 50, seed=1, match_texture=False)
+            return float((luma_np(out) - luma_np(x)).std())
+        ref = std("ISO 200")
+        for iso, mul in fg.ISO_LOUDNESS.items():
+            self.assertAlmostEqual(std(iso) / ref, mul, delta=0.06, msg=iso)
+        louds = [fg.ISO_LOUDNESS[n] for n in fg.ISO_NAMES]
+        self.assertTrue(all(b < a for a, b in zip(louds, louds[1:])))  # coarser grain, less amplitude
+
     def test_status_line_and_validation(self):
-        _, st = fg.add_grain(flat(0.4, 64, 64), "ISO 400", 50, seed=42, match_texture=False)
+        _, st = fg.add_grain(flat(0.4, 64, 64), "ISO 200", 50, seed=42, match_texture=False)
         line = fg.status_line(st, seconds=0.05)
-        self.assertTrue(line.startswith("grain ISO 400 strength 50 · 3.3/255 midtone"))
+        self.assertTrue(line.startswith("grain ISO 200 strength 50 · 3.3/255 midtone"))
         self.assertIn("monochrome (luma grain only)", line)
         self.assertIn("seed 42", line)
         self.assertNotIn("texture floor", line)
         _, st = fg.add_grain(flat(0.4, 64, 64), "ISO 400", 50, seed=42)
         line = fg.status_line(st)
         self.assertIn("x1.00 for texture floor 0.00/255", line)  # a clean card gets exactly the strength's amount
-        self.assertTrue(line.startswith("grain ISO 400 strength 50 · 3.3/255 midtone"))
+        self.assertTrue(line.startswith("grain ISO 400 strength 50 · 3.0/255 midtone"))  # 3.3 x loudness 0.9
         for ln in (line, fg.status_line(st, seconds=0.1)):
             self.assertNotIn(":", ln)  # Forge JSON-quotes infotext values containing a colon...
             self.assertNotIn(",", ln)  # ...or a comma
@@ -222,6 +239,97 @@ class GrainTests(unittest.TestCase):
             fg.add_grain(flat(0.4, 64, 64), "ISO 12800", 50)
         with self.assertRaises(ValueError):
             fg.add_grain(flat(0.4, 64, 64), "ISO 400", 50, chroma="maybe")
+
+
+class ToneAndSizeTests(unittest.TestCase):
+    def test_amount_curves(self):
+        L = torch.tensor([0.0, 0.03, 0.10, 0.25, 0.45, 0.65, 0.80, 0.90, 0.95, 1.0])
+        pr = fg.amount_weight(L, "print")
+        self.assertAlmostEqual(float(fg.amount_weight(torch.tensor([fg.MIDTONE_REF]), "print")), 1.0, places=6)
+        self.assertAlmostEqual(float(fg.amount_weight(torch.tensor([fg.MIDTONE_REF]), "negative")), 1.0, places=6)
+        self.assertEqual(float(pr[0]), 0.0)
+        self.assertEqual(float(pr[-1]), 0.0)
+        self.assertEqual(float(pr[-2]), 0.0)
+        self.assertGreater(float(pr[2]), 1.5)  # darks get the most
+        self.assertLess(float(pr[6]), 0.4)  # brights little
+        ng = fg.amount_weight(L, "negative")
+        self.assertGreater(float(ng[6]), 1.1)  # a negative scan: more in the highlights
+        self.assertLess(float(ng[2]), 0.8)
+        mid = torch.linspace(0, 1, 501)
+        self.assertTrue(bool((fg.amount_weight(mid, "print") >= 0).all()))
+
+    def test_film_type_moves_the_grain_between_darks_and_brights(self):
+        dark, bright = flat(0.12), flat(0.80)
+        def std(x, film):
+            out, _ = fg.add_grain(x, "ISO 200", 50, seed=4, film=film, match_texture=False)
+            return float((luma_np(out) - luma_np(x)).std())
+        self.assertGreater(std(dark, "print"), std(bright, "print") * 3)
+        self.assertGreater(std(bright, "negative"), std(dark, "negative"))
+        with self.assertRaises(ValueError):
+            fg.add_grain(dark, "ISO 200", 50, film="slide")
+
+    def test_field_has_unit_variance_at_every_exposure(self):
+        for v in (0.05, 0.3, 0.5, 0.9):
+            L = torch.full((1, 1, 384, 384), v)
+            f = fg.grain_field_exposure(L, 0.8, 0.02, seed=3)[0, 0].numpy()
+            self.assertAlmostEqual(float(f.std()), 1.0, delta=0.04, msg=v)
+            self.assertAlmostEqual(float(f.mean()), 0.0, delta=0.03, msg=v)
+
+    def test_grain_is_coarser_in_the_shadows(self):
+        x = torch.cat([torch.full((1, 512, 256, 3), 0.10), torch.full((1, 512, 256, 3), 0.70)], dim=2)
+        out, st = fg.add_grain(x, "ISO 800", 50, seed=6, match_texture=False)
+        d = luma_np(out) - luma_np(x)
+        dark, bright = d[:, 16:240], d[:, 272:496]
+        self.assertGreater(acf(dark, 1, 0), acf(bright, 1, 0) + 0.15)  # larger blobs
+        self.assertGreater(kurt(dark), kurt(bright))  # clumpier
+        self.assertGreater(st[0]["sigma_shadow_px"], st[0]["sigma_highlight_px"] * 1.7)
+
+
+class PaperTests(unittest.TestCase):
+    @staticmethod
+    def polaroid(h=900, w=700, top=60, bottom=200, side=45, paper=0.91, seed=0):
+        """Off-white paper border with a faint gradient around a busy picture."""
+        g = torch.Generator().manual_seed(seed)
+        img = torch.full((1, h, w, 3), paper) + torch.linspace(-0.01, 0.01, w).view(1, 1, w, 1)
+        pic = torch.rand(1, h - top - bottom, w - 2 * side, 3, generator=g) * 0.8 + 0.1
+        pic = torch.nn.functional.avg_pool2d(pic.permute(0, 3, 1, 2), 3, 1, 1).permute(0, 2, 3, 1)
+        img[:, top : h - bottom, side : w - side] = pic
+        return img
+
+    def test_frame_detected_and_left_bit_exact(self):
+        x = self.polaroid()
+        fr = fg.detect_frame(x.permute(0, 3, 1, 2))
+        self.assertIsNotNone(fr)
+        self.assertEqual((fr["top"], fr["bottom"], fr["left"], fr["right"]), (60, 200, 45, 45))
+        out, st = fg.add_grain(x, "ISO 400", 100, seed=2)
+        self.assertEqual(st[0]["frame"]["bottom"], 200)
+        self.assertTrue(torch.equal(out[:, :60], x[:, :60]))
+        self.assertTrue(torch.equal(out[:, -200:], x[:, -200:]))
+        self.assertTrue(torch.equal(out[:, :, :45], x[:, :, :45]))
+        self.assertTrue(torch.equal(out[:, :, -45:], x[:, :, -45:]))
+        self.assertFalse(torch.equal(out[:, 100:600, 100:600], x[:, 100:600, 100:600]))
+        self.assertIn("frame excluded 60/200/45/45 px", fg.status_line(st))
+
+    def test_no_frame_on_a_sky_band_or_a_plain_photo(self):
+        x = self.polaroid()[:, 60:-200, 45:-45]  # the picture alone
+        self.assertIsNone(fg.detect_frame(x.permute(0, 3, 1, 2)))
+        sky = x.clone()
+        sky[:, :120] = 0.75  # a clear sky along one edge only
+        self.assertIsNone(fg.detect_frame(sky.permute(0, 3, 1, 2)))
+        _, st = fg.add_grain(sky, "ISO 200", 50, seed=1)
+        self.assertIsNone(st[0]["frame"])
+        _, st = fg.add_grain(self.polaroid(), "ISO 200", 50, seed=1, frame_detect=False)
+        self.assertIsNone(st[0]["frame"])
+
+    def test_flat_paper_white_inside_the_picture_gets_no_grain(self):
+        x = flat(0.5, 256, 512)
+        x[:, 64:192, 300:460] = 0.9  # flat paper white
+        g = torch.Generator().manual_seed(1)
+        x[:, 64:192, 40:200] = 0.88 + torch.randn(1, 128, 160, 1, generator=g) * (3 / 255)  # bright but textured
+        out, _ = fg.add_grain(x, "ISO 200", 100, seed=3, match_texture=False)
+        d = luma_np(out) - luma_np(x)
+        self.assertLess(float(np.abs(d[104:152, 344:424]).max()), 0.05)  # paper core: nothing (the gate ramps over two blocks at its edge)
+        self.assertGreater(float(d[90:166, 60:180].std()), 0.3)  # textured bright area: a little grain
 
 
 class TextureMatchTests(unittest.TestCase):
@@ -250,7 +358,7 @@ class TextureMatchTests(unittest.TestCase):
         self.assertEqual(fg.texture_factor(0.0), 1.0)  # clean: never less than the strength asks for
         self.assertEqual(fg.texture_factor(0.45), 1.0)
         self.assertEqual(fg.texture_factor(1.1), 1.0)
-        self.assertAlmostEqual(fg.texture_factor(2.2), 2 ** 0.6, places=6)
+        self.assertAlmostEqual(fg.texture_factor(1.65), 1.5 ** 0.6, places=6)
         self.assertEqual(fg.texture_factor(50.0), fg.MASK_MAX_FACTOR)
         vals = [fg.texture_factor(f / 10) for f in range(0, 80)]
         self.assertTrue(all(b >= a for a, b in zip(vals, vals[1:])))  # monotone
@@ -261,11 +369,11 @@ class TextureMatchTests(unittest.TestCase):
         out_r, st_r = fg.add_grain(rough, "ISO 200", 50, seed=7)
         self.assertEqual(st_c[0]["texture_factor"], 1.0)
         self.assertAlmostEqual(st_c[0]["amp_255"], fg.strength_to_amp(50), places=6)
-        self.assertGreater(st_r[0]["texture_factor"], 1.5)
+        self.assertGreater(st_r[0]["texture_factor"], 1.3)
         self.assertAlmostEqual(st_r[0]["amp_255"], st_r[0]["nominal_255"] * st_r[0]["texture_factor"], places=6)
         added_c = (luma_np(out_c) - luma_np(clean)).std()
         added_r = (luma_np(out_r) - luma_np(rough)).std()
-        self.assertGreater(added_r, added_c * 1.4)
+        self.assertGreater(added_r, added_c * 1.25)
         # off: the nominal amount on both
         _, st_off = fg.add_grain(rough, "ISO 200", 50, seed=7, match_texture=False)
         self.assertAlmostEqual(st_off[0]["amp_255"], fg.strength_to_amp(50), places=6)
@@ -275,7 +383,9 @@ class TextureMatchTests(unittest.TestCase):
         _, st = fg.add_grain(rough, "ISO 200", 50, seed=7)
         self.assertEqual(st[0]["texture_factor"], fg.MASK_MAX_FACTOR)
         _, st100 = fg.add_grain(rough, "ISO 200", 100, seed=7)
-        self.assertAlmostEqual(st100[0]["amp_255"], max(fg.AMP_CAP_255, fg.strength_to_amp(100)), places=6)
+        self.assertAlmostEqual(st100[0]["amp_255"], fg.strength_to_amp(100) * fg.MASK_MAX_FACTOR, places=5)
+        _, st100 = fg.add_grain(rough, "ISO 100", 100, seed=7)  # 8 x 1.15 x 1.4 = 12.9 -> the absolute cap
+        self.assertAlmostEqual(st100[0]["amp_255"], fg.AMP_CAP_255, places=5)
         _, st0 = fg.add_grain(rough, "ISO 200", 0, seed=7)
         self.assertEqual(st0[0]["amp_255"], 0.0)  # strength 0 stays off
 
@@ -288,7 +398,7 @@ class TextureMatchTests(unittest.TestCase):
         x = torch.cat([self.textured(0.4, 256, 256, 1), self.textured(3.0, 256, 256, 2)], dim=0)
         _, st = fg.add_grain(x, "ISO 200", 50, seed=3)
         self.assertEqual(st[0]["texture_factor"], 1.0)
-        self.assertGreater(st[1]["texture_factor"], 1.5)
+        self.assertGreater(st[1]["texture_factor"], 1.3)
 
 
 if __name__ == "__main__":

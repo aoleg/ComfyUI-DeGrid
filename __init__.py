@@ -317,9 +317,16 @@ class FilmGrain(io.ComfyNode):
                     "match_texture", default=True,
                     tooltip="Keep the visible amount of grain the same on every image. Texture an image "
                             "already has hides part of the grain added to it, so a textured or already "
-                            "grainy image gets more (up to 2x) to show as much grain as a clean one. A "
+                            "grainy image gets more (up to 1.4x) to show as much grain as a clean one. A "
                             "clean render gets exactly the strength's amount. Never reduces it. Off = the "
                             "strength's amount on every image.",
+                ),
+                io.Combo.Input(
+                    "film_type", options=list(grain_core.FILM_TYPES), default=grain_core.FILM_DEFAULT,
+                    tooltip="Where the grain shows most. print (default): a print or a reversal slide, "
+                            "most grain in the darks, less in the mids, little in the brights, none on "
+                            "pure black or white. negative: a negative scan, more grain in the "
+                            "highlights. Grain size follows exposure either way: coarser in the shadows.",
                 ),
                 io.Int.Input(
                     "seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF, control_after_generate=True,
@@ -330,11 +337,11 @@ class FilmGrain(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, image, enabled, iso, strength, colour_grain, match_texture, seed):
+    def execute(cls, image, enabled, iso, strength, colour_grain, match_texture, film_type, seed):
         if not enabled:
             return io.NodeOutput(image, ui=ui.PreviewText("bypassed (enabled = off)"))
         t0 = time.perf_counter()
-        out, stats = grain_core.add_grain(image, iso=iso, strength=float(strength), seed=int(seed), chroma=colour_grain, match_texture=bool(match_texture))
+        out, stats = grain_core.add_grain(image, iso=iso, strength=float(strength), seed=int(seed), chroma=colour_grain, match_texture=bool(match_texture), film=film_type)
         line = grain_core.status_line(stats, seconds=time.perf_counter() - t0)
         _console(line)
         return io.NodeOutput(out, ui=ui.PreviewText(line))

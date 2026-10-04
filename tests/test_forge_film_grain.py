@@ -35,8 +35,8 @@ def as_tensor(image: Image.Image) -> torch.Tensor:
 
 
 class ScriptTests(unittest.TestCase):
-    UI_ORDER = ["enabled", "iso", "strength", "colour_grain", "match_texture"]
-    DEFAULTS = dict(enabled=False, iso="ISO 200", strength=50, colour_grain="auto", match_texture=True)
+    UI_ORDER = ["enabled", "iso", "strength", "colour_grain", "match_texture", "film_type"]
+    DEFAULTS = dict(enabled=False, iso="ISO 200", strength=50, colour_grain="auto", match_texture=True, film_type="print")
 
     def setUp(self):
         self.script = script_mod.FilmGrainScript()
@@ -63,7 +63,8 @@ class ScriptTests(unittest.TestCase):
         self.assertEqual(controls[1].choices, list(fg.ISO_NAMES))
         self.assertEqual(controls[3].choices, list(fg.CHROMA_MODES))
         self.assertEqual(self.script.sorting_priority, 30)
-        self.assertEqual(len(self.script.infotext_fields), 5)
+        self.assertEqual(len(self.script.infotext_fields), 6)
+        self.assertEqual(controls[5].choices, list(fg.FILM_TYPES))
 
     def test_disabled_is_a_no_op(self):
         p = self.processing()
@@ -76,10 +77,10 @@ class ScriptTests(unittest.TestCase):
 
     def test_full_run_uses_the_image_seed_and_writes_parameters(self):
         p = self.processing(seeds=(7, 8))
-        image = pil_image(0.38)
+        image = pil_image(fg.MIDTONE_REF)
         pp = self.pp_cls(image, 1)  # second image of the batch
         self.script.process(p, *self.args(enabled=True, match_texture=False))
-        self.assertEqual(p.extra_generation_params[script_mod.INFOTEXT_KEY], "iso=ISO200;strength=50;chroma=auto;match=0")
+        self.assertEqual(p.extra_generation_params[script_mod.INFOTEXT_KEY], "iso=ISO200;strength=50;chroma=auto;match=0;film=print")
         with self.assertLogs("processing", level="INFO") as logs:
             self.script.postprocess_image_after_composite(p, pp, *self.args(enabled=True, match_texture=False))
         self.assertEqual(len(logs.output), 1)
@@ -103,10 +104,10 @@ class ScriptTests(unittest.TestCase):
 
     def test_match_texture_gives_a_clean_image_the_full_amount(self):
         p = self.processing(seeds=(7,))
-        image = pil_image(0.38)  # a perfectly clean card: floor 0
+        image = pil_image(fg.MIDTONE_REF)  # a perfectly clean card: floor 0
         pp = self.pp_cls(image, 0)
         self.script.process(p, *self.args(enabled=True))
-        self.assertTrue(p.extra_generation_params[script_mod.INFOTEXT_KEY].endswith(";match=1"))
+        self.assertIn(";match=1", p.extra_generation_params[script_mod.INFOTEXT_KEY])
         self.script.postprocess_image_after_composite(p, pp, *self.args(enabled=True))
         result = p.extra_generation_params[script_mod.INFOTEXT_RESULT_KEY]
         self.assertIn("x1.00 for texture floor 0.00/255", result)
@@ -127,7 +128,7 @@ class ScriptTests(unittest.TestCase):
         p = self.processing()
         image = pil_image(0.5, rgb=(1.0, 0.8, 0.6)).convert("RGBA")
         pp = self.pp_cls(image, 0)
-        self.script.postprocess_image_after_composite(p, pp, True, "ISO 12800", "75", "maybe", True)
+        self.script.postprocess_image_after_composite(p, pp, True, "ISO 12800", "75", "maybe", True, "slide")
         self.assertEqual(pp.image.mode, "RGBA")
         self.assertTrue(np.array_equal(np.asarray(pp.image)[..., 3], np.asarray(image)[..., 3]))
         self.assertIn("grain ISO 200 strength 75", p.extra_generation_params[script_mod.INFOTEXT_RESULT_KEY])
@@ -135,13 +136,15 @@ class ScriptTests(unittest.TestCase):
 
     def test_paste_fields(self):
         self.script.ui(False)
-        readers = {name: pf.function for pf, name in zip(self.script.infotext_fields, ["enabled", "iso", "strength", "chroma", "match"])}
-        params = {script_mod.INFOTEXT_KEY: "iso=ISO1600;strength=35;chroma=off;match=0"}
+        readers = {name: pf.function for pf, name in zip(self.script.infotext_fields, ["enabled", "iso", "strength", "chroma", "match", "film"])}
+        params = {script_mod.INFOTEXT_KEY: "iso=ISO1600;strength=35;chroma=off;match=0;film=negative"}
         self.assertIs(readers["enabled"](params), True)
         self.assertEqual(readers["iso"](params), "ISO 1600")
         self.assertAlmostEqual(readers["strength"](params), 35.0)
         self.assertEqual(readers["chroma"](params), "off")
         self.assertIs(readers["match"](params), False)
+        self.assertEqual(readers["film"](params), "negative")
+        self.assertIsNone(readers["film"]({script_mod.INFOTEXT_KEY: "iso=ISO200;strength=50;chroma=auto;match=1"}))  # older images
         self.assertIsNone(readers["match"]({script_mod.INFOTEXT_KEY: "iso=ISO200;strength=50;chroma=auto"}))  # images made before the option
         self.assertIs(readers["enabled"]({}), False)
         self.assertIsNone(readers["iso"]({}))

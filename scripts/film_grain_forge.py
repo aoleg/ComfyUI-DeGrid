@@ -57,9 +57,9 @@ def _to_image(t: torch.Tensor, mode: str = "RGB") -> Image.Image:
     return Image.fromarray(arr, mode=mode)
 
 
-def infotext(iso, strength, colour_grain, match_texture) -> str:
+def infotext(iso, strength, colour_grain, match_texture, film_type) -> str:
     """Compact ``k=v;k=v`` form; no colons or commas so Forge writes it unquoted."""
-    return f"iso={str(iso).replace(' ', '')};strength={float(strength):g};chroma={colour_grain};match={int(bool(match_texture))}"
+    return f"iso={str(iso).replace(' ', '')};strength={float(strength):g};chroma={colour_grain};match={int(bool(match_texture))};film={film_type}"
 
 
 def parse_infotext(text: str | None) -> dict[str, str] | None:
@@ -149,7 +149,11 @@ class FilmGrainScript(scripts.Script):
             with gr.Row():
                 match_texture = gr.Checkbox(
                     value=True, label="Same visible grain on textured images",
-                    info="textured or already grainy images hide part of the grain, so they get more (up to 2x); clean renders get exactly the strength's amount; never less",
+                    info="textured or already grainy images hide part of the grain, so they get more (up to 1.4x); clean renders get exactly the strength's amount; never less",
+                )
+                film_type = gr.Radio(
+                    choices=list(core.FILM_TYPES), value=core.FILM_DEFAULT, label="Film type",
+                    info="print: a print or slide, most grain in the darks; negative: a negative scan, more in the highlights; grain is coarser in the shadows either way",
                 )
 
         self.infotext_fields = [
@@ -158,17 +162,18 @@ class FilmGrainScript(scripts.Script):
             PasteField(strength, _paste("strength", float)),
             PasteField(colour_grain, _paste("chroma", str)),
             PasteField(match_texture, _paste("match", _paste_bool)),
+            PasteField(film_type, _paste("film", str)),
         ]
         # Positional order == the hooks' parameter order.
-        return [enabled, iso, strength, colour_grain, match_texture]
+        return [enabled, iso, strength, colour_grain, match_texture, film_type]
 
-    def process(self, p, enabled, iso, strength, colour_grain, match_texture, **kwargs):
+    def process(self, p, enabled, iso, strength, colour_grain, match_texture, film_type, **kwargs):
         if not enabled:
             return
-        p.extra_generation_params[INFOTEXT_KEY] = infotext(iso, strength, colour_grain, match_texture)
+        p.extra_generation_params[INFOTEXT_KEY] = infotext(iso, strength, colour_grain, match_texture, film_type)
 
     @torch.inference_mode()
-    def postprocess_image_after_composite(self, p, pp, enabled, iso, strength, colour_grain, match_texture, **kwargs):
+    def postprocess_image_after_composite(self, p, pp, enabled, iso, strength, colour_grain, match_texture, film_type, **kwargs):
         if not enabled:
             return
         image = getattr(pp, "image", None)
@@ -177,13 +182,14 @@ class FilmGrainScript(scripts.Script):
         core = load_grain_core(_EXTENSION_ROOT)
         iso = str(iso) if str(iso) in core.ISO_NAMES else core.ISO_DEFAULT
         colour_grain = str(colour_grain) if str(colour_grain) in core.CHROMA_MODES else "auto"
+        film_type = str(film_type) if str(film_type) in core.FILM_TYPES else core.FILM_DEFAULT
         index = int(getattr(pp, "index", 0) or 0)
         seed = seed_for(p, index)
 
         x, mode = _to_tensor(image)
         work = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         t0 = time.perf_counter()
-        out, stats = core.add_grain(x, iso=iso, strength=float(strength), seed=seed, chroma=colour_grain, match_texture=bool(match_texture), work_device=work)
+        out, stats = core.add_grain(x, iso=iso, strength=float(strength), seed=seed, chroma=colour_grain, match_texture=bool(match_texture), film=film_type, work_device=work)
         line = core.status_line(stats, seconds=time.perf_counter() - t0)
 
         logger.info(_ascii(f"Film grain: {image.width}x{image.height} [{index + 1}] | {line}"))
@@ -191,7 +197,7 @@ class FilmGrainScript(scripts.Script):
         pp.image = _to_image(out, mode)
 
 
-_UI_PARAMS = ["enabled", "iso", "strength", "colour_grain", "match_texture"]
+_UI_PARAMS = ["enabled", "iso", "strength", "colour_grain", "match_texture", "film_type"]
 for _hook in (FilmGrainScript.process, FilmGrainScript.postprocess_image_after_composite):
     _params = [n for n in inspect.signature(_hook).parameters if n not in ("self", "p", "pp", "kwargs")]
     assert _params == _UI_PARAMS, (_hook.__name__, _params)

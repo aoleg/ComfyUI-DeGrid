@@ -37,7 +37,7 @@ public class DeGridExtension : Extension
     /// <summary>The third node of the same pack: film grain, the last thing that touches the final image.</summary>
     public const string GrainNodeId = "FilmGrain";
 
-    public static string[] RequiredGrainNodeInputs = ["image", "enabled", "iso", "strength", "colour_grain", "match_texture", "seed"];
+    public static string[] RequiredGrainNodeInputs = ["image", "enabled", "iso", "strength", "colour_grain", "match_texture", "film_type", "seed"];
 
     public static readonly string[] GrainIsoNames = ["ISO 100", "ISO 200", "ISO 400", "ISO 800", "ISO 1600", "ISO 3200"];
 
@@ -65,7 +65,7 @@ public class DeGridExtension : Extension
 
     public static T2IParamGroup GrainGroup;
 
-    public static T2IRegisteredParam<string> GrainIso, GrainChroma;
+    public static T2IRegisteredParam<string> GrainIso, GrainChroma, GrainFilmType;
 
     public static T2IRegisteredParam<double> GrainStrength;
 
@@ -163,8 +163,12 @@ public class DeGridExtension : Extension
             "auto", Group: GrainGroup, FeatureFlag: FeatureId, OrderPriority: 3, IsAdvanced: true,
             GetValues: (_) => ["auto", "on", "off"]
             ));
-        GrainMatchTexture = T2IParamTypes.Register<bool>(new("[Film Grain] Same Visible Grain On Textured Images", "[Film Grain]\nKeep the visible amount of grain the same on every image. Texture an image already has hides part of the grain added to it, so a textured or already grainy image gets more (up to 2x) to show as much grain as a clean one.\nA clean render gets exactly the strength's amount. Never reduces it. Off = the strength's amount on every image.",
+        GrainMatchTexture = T2IParamTypes.Register<bool>(new("[Film Grain] Same Visible Grain On Textured Images", "[Film Grain]\nKeep the visible amount of grain the same on every image. Texture an image already has hides part of the grain added to it, so a textured or already grainy image gets more (up to 1.4x) to show as much grain as a clean one.\nA clean render gets exactly the strength's amount. Never reduces it. Off = the strength's amount on every image.",
             "true", Group: GrainGroup, FeatureFlag: FeatureId, OrderPriority: 4
+            ));
+        GrainFilmType = T2IParamTypes.Register<string>(new("[Film Grain] Film Type", "[Film Grain]\nWhere the grain shows most. Print (default): a print or a reversal slide, most grain in the darks, less in the mids, little in the brights, none on pure black or white.\nNegative scan: more grain in the highlights. Grain size follows exposure either way: coarser in the shadows.",
+            "print", Group: GrainGroup, FeatureFlag: FeatureId, OrderPriority: 5, IsAdvanced: true,
+            GetValues: (_) => ["print///Print or slide", "negative///Negative scan"]
             ));
         // Refiner region ends at -4 and the core final decode ("8") runs at 1. DeGrid at 1.5, Enhance after it, grain last.
         WorkflowGenerator.AddStep(ApplyToRefinerDecode, -3.9);
@@ -383,6 +387,11 @@ public class DeGridExtension : Extension
         string chroma = g.UserInput.Get(GrainChroma, "auto");
         double strength = g.UserInput.Get(GrainStrength, 50);
         bool match = g.UserInput.Get(GrainMatchTexture, true);
+        string film = g.UserInput.Get(GrainFilmType, "print");
+        if (film != "print" && film != "negative")
+        {
+            film = "print";
+        }
         long seed = g.UserInput.Get(T2IParamTypes.Seed, 0);
         string node = g.CreateNode(GrainNodeId, new JObject()
         {
@@ -392,10 +401,11 @@ public class DeGridExtension : Extension
             ["strength"] = strength,
             ["colour_grain"] = chroma,
             ["match_texture"] = match,
+            ["film_type"] = film,
             ["seed"] = seed
         });
         g.CurrentMedia = g.CurrentMedia.WithPath([node, 0]);
-        g.UserInput.ExtraMeta["film_grain"] = $"iso={iso.Replace(" ", "")};strength={strength};chroma={chroma};match={(match ? 1 : 0)};seed={seed}";
+        g.UserInput.ExtraMeta["film_grain"] = $"iso={iso.Replace(" ", "")};strength={strength};chroma={chroma};match={(match ? 1 : 0)};film={film};seed={seed}";
     }
 
     /// <summary>The refiner step (-4) decodes to the reserved node "24" when it upscales in pixel space, saves an
