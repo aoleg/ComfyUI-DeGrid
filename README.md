@@ -119,7 +119,7 @@ After each run the node shows what it measured:
 
   This is a *phase-locked* measurement, not a percentile of the filter's own output. The grid's phase is tied to the VAE's output stride, so it is constant across the frame: averaging the four `(y%2, x%2)` sublattices keeps the grid while genuine detail cancels. That matters, because "how much high-frequency content is in this image" is not the same question as "is there a grid", and answering the first one gets it backwards on a busy image.
 - **`limit N (auto|manual)`** — the correction cap that was applied. In auto mode this is a range, e.g. `limit 0.010-0.050 auto`: the lowest and highest tile limits in the image.
-- **`partially removed, X/255 left`** — the cap was lower than the grid's own amplitude, so part of the lattice survived. The node measures what is left in the cleaned image rather than assuming the notch got it all. Raise the limit (or go back to `auto`).
+- **`partially removed, X/255 left`** — the cap was lower than the grid's own amplitude, so part of the lattice survived. The node measures what is left in the cleaned image, so the number is the real residual. Raise the limit (or go back to `auto`).
 - **`edges protected N%`** — percentage of pixels where the correction hit the cap. Those are real edges/detail being passed through unsoftened. A few percent is normal; a very high number means lots of legitimate high-frequency content (or a manual limit set too low).
 
 ## Reading the removed_grid preview
@@ -192,7 +192,7 @@ Settings are saved to the image parameters as `DeGrid: mode=auto;skip=1;threshol
 
 ### Notes
 
-- **Order relative to other decode-side extensions.** DeGrid installs its VAE wrapper early (`sorting_priority = 10`), so an extension that swaps the VAE later, such as Neo VAE Utils, replaces the wrapper rather than being wrapped by it. Its decode then runs without DeGrid, which is the right outcome for an upscaling decoder that already averages the grid away.
+- **Order relative to other decode-side extensions.** DeGrid installs its VAE wrapper early (`sorting_priority = 10`), so an extension that swaps the VAE later, such as Neo VAE Utils, replaces the wrapper. Its decode then runs without DeGrid, which is the right outcome for an upscaling decoder that already averages the grid away.
 - **Batches.** Each image in a batch is measured and limited on its own. The console line carries `[i/n]`; the parameters carry the first image's verdict.
 - **Interrupted runs.** The swap is scoped to one sampling pass by Forge itself and is additionally undone at the end of every run and at the start of the next, so an interrupted generation cannot leave the wrapper installed.
 - **Tests.** `python -m unittest discover -s tests -v` from the repo root, with any venv that has torch, numpy and Pillow. No Forge checkout or checkpoint is needed; the hook wiring, the decode topology (direct, tiled, OOM fallback), the hires double pass and the parameter round trip are all covered offline.
@@ -211,7 +211,7 @@ A recurring suggestion is to avoid the grid by not using the Qwen decoder at all
 | Krea 2, degridded | 0.32 | 1.22 | 0.02 | 0.03 | 0.07 | 0.05 |
 | Z-Image (Flux VAE) | 0.07 | 1.06 | 0.03 | 0.04 | 0.08 | 0.06 |
 
-- **The lattice is made by the decoder, not carried in the latent.** A grid-free input produces the same 2x lattice as a gridded one, and a gridded input's lattice does not survive the encoder. Degridding before a re-encode only protects whatever reads the pixels in between (an upscaler, a restorer); the next Qwen decode always adds a fresh grid, which is why the Forge extension filters every decode rather than the final image.
+- **The lattice is made by the decoder, not carried in the latent.** A grid-free input produces the same 2x lattice as a gridded one, and a gridded input's lattice does not survive the encoder. Degridding before a re-encode only protects whatever reads the pixels in between (an upscaler, a restorer); the next Qwen decode always adds a fresh grid, which is why the Forge extension filters every decode.
 - **At 2x the upscale decoder is gridded too**, at about half the stock amplitude, vertical stripes dominant, phase-locked across the whole frame. Use DeGrid after it. In Forge the two extensions compose on their own.
 - **Downscaled back to 1x it is clean.** Every filter leaves at most 0.11/255 (area, a 2-tap box); gaussian and bilinear leave 0.02-0.04, and DeGrid reports `none detected` and passes the image through. The round trip reconstructs Wan-native content at 39-41 dB PSNR.
 
@@ -227,7 +227,7 @@ The Qwen Image VAE that Krea 2, Qwen Image and Anima decode through has two repu
 
 ### What the research showed
 
-Two measurements settled it. A five-VAE round trip of a real photo ([sheet](scr/research-five-vae-roundtrip.png): Flux 1, Flux 2, Qwen 1, Qwen 2.1 and Wan 2.1, eye region at 4x) confirmed that a plain round trip removes the grid but re-writes about half of the pore texture with its own version at the same energy, so it cannot restore anything that is not already there. It also showed that the stock Wan 2.1 decoder has no lattice at all, so the grid is a property of the Qwen fine-tune, not of the architecture. The operation that does add texture is *extrapolation*: encode the image, encode a slightly blurred copy, and decode the latent pushed away from the blurred one. The difference between the two latents is what the encoder considers fine detail, in the channel space where sub-8px structure actually lives, and the decoder renders the added energy as pores and strands rather than as the edge halo and uniform grain a pixel unsharp mask produces at the same energy. The first ladder on a Krea 2 portrait ([sheet](scr/research-first-ladder.png): original, round trip, gains 1 to 3, then the pixel unsharp mask at matched energy) fixed the working range: gain 0.5 draws pores, gain 1 tints and etches, gain 2 and above turns skin into worms and oil paint. Eight images later the defaults below were set, and two more findings shaped the design: the grid must be notched *before* the extrapolation, because blurring removes it and the difference would otherwise carry it back onto every flat wall, and a fixed gain amplifies regular fabric weave into moiré from about 0.75, which is why 0.5 is the default and not a starting point.
+Two measurements settled it. A five-VAE round trip of a real photo ([sheet](scr/research-five-vae-roundtrip.png): Flux 1, Flux 2, Qwen 1, Qwen 2.1 and Wan 2.1, eye region at 4x) confirmed that a plain round trip removes the grid but re-writes about half of the pore texture with its own version at the same energy, so it cannot restore anything that is not already there. It also showed that the stock Wan 2.1 decoder has no lattice at all, so the grid is a property of the Qwen fine-tune, not of the architecture. The operation that does add texture is *extrapolation*: encode the image, encode a slightly blurred copy, and decode the latent pushed away from the blurred one. The difference between the two latents is what the encoder considers fine detail, in the channel space where sub-8px structure actually lives, and the decoder renders the added energy as pores and strands, where a pixel unsharp mask at the same energy produces edge halo and uniform grain. The first ladder on a Krea 2 portrait ([sheet](scr/research-first-ladder.png): original, round trip, gains 1 to 3, then the pixel unsharp mask at matched energy) fixed the working range: gain 0.5 draws pores, gain 1 tints and etches, gain 2 and above turns skin into worms and oil paint. Eight images later the defaults below were set, and two more findings shaped the design: the grid must be notched *before* the extrapolation, because blurring removes it and the difference would otherwise carry it back onto every flat wall, and a fixed gain amplifies regular fabric weave into moiré from about 0.75, which is why 0.5 is the default and not a starting point.
 
 ### What we made
 
@@ -245,7 +245,7 @@ In Forge Neo the two accordions sit side by side. VAE DeGrid runs inside every V
 
 ![VAE DeGrid accordion in Forge Neo](scr/vae-degrid.png)
 
-VAE Enhance runs once per final image. The dropdown lists only files whose safetensors header is a Flux.2 VAE, by header rather than by name, and every control has its measured default:
+VAE Enhance runs once per final image. The dropdown lists only files whose safetensors header is a Flux.2 VAE (the file name does not matter), and every control has its measured default:
 
 ![VAE Enhance accordion in Forge Neo](scr/vae-enhance.png)
 
@@ -482,7 +482,7 @@ A third parameter group, **Film Emulation**, on the same node pack: **ISO**, **G
 
 ### Notes
 
-- **Version check.** ComfyUI silently ignores inputs a node does not declare. On every backend refresh the extension compares the installed node's inputs with the ones it sends and logs a warning naming anything missing, for example a `DLNodes` clone that predates the `threshold` input, or a `VAEDeGrid` node supplied by [ComfyUI-SaveSimple](https://github.com/lunaaispace-eng/ComfyUI-SaveSimple) instead of this repo.
+- **Version check.** ComfyUI silently ignores inputs a node does not declare. On every backend refresh the extension compares the installed node's inputs with the ones it sends and logs a warning naming anything missing, for example a `DLNodes` clone that predates the `threshold` input, or a `VAEDeGrid` node supplied by another pack, such as [ComfyUI-SaveSimple](https://github.com/lunaaispace-eng/ComfyUI-SaveSimple).
 - **Two clones of this repo are expected.** One under `src/Extensions` (the C# extension), one under the backend's `DLNodes` (the node pack). SwarmUI compiles the `DLNodes` copy of the `.cs` file into its core assembly as well, so the extension is prepped twice at startup; a process-wide guard makes the second init a no-op. Two `Prepping extension` lines in the log are normal.
 
 ## How it works
@@ -493,7 +493,7 @@ The correction is then amplitude-clamped before subtraction, so strong real edge
 
 Per-tile calibration matters because the grid is not uniform: it rides on texture. On a Qwen Image 2.1 desert scene it measured 0.7/255 in the sky and 8.8/255 on the ground, and the tile map settles at 0.005–0.007 over the sky and 0.05 over the ground, where one frame-wide limit had been 0.05 everywhere. What the map cannot do is separate detail from a grid that sits on that same detail: the dry twigs carry a 3/255 lattice themselves, so their tiles keep a high cap and lose the same few percent of 2px-band energy either way. The protection is for the regions that do not need the high cap. Krea 2 decodes settle at the first or second step; Qwen Image 2.1 decodes carry a heavier tail in the notch band and their textured tiles climb to 0.03–0.05.
 
-Separately from the clamp, the node decides *whether there is a grid at all* by measuring the phase-locked lattice (see **Status line** above). Measured across Qwen Image 2.1 outputs, that separates cleanly by about 10×: native VAE decodes read 1.6–2.0/255, the same images after an upscaler read 0.10–0.20/255, and a pure-noise control reads 0.05/255. Below the 0.5/255 threshold the filter is skipped entirely rather than run at a small setting, because the notch is cheap but not free — on a clean, detailed image it still shaves roughly 1/255 of real high-frequency detail.
+Separately from the clamp, the node decides *whether there is a grid at all* by measuring the phase-locked lattice (see **Status line** above). Measured across Qwen Image 2.1 outputs, that separates cleanly by about 10×: native VAE decodes read 1.6–2.0/255, the same images after an upscaler read 0.10–0.20/255, and a pure-noise control reads 0.05/255. Below the 0.5/255 threshold the filter is skipped entirely: the notch is cheap, and on a clean, detailed image it still shaves roughly 1/255 of real high-frequency detail.
 
 Based on the GLSL notch-filter approach shared by [u/Haiku-575 on r/StableDiffusion](https://www.reddit.com/r/StableDiffusion/comments/1umwhq7/2px_pixel_grid_on_krea2_from_vae_and_how_to/), reimplemented in pure PyTorch with a narrower 9-tap kernel, amplitude limiting, and per-image auto-calibration.
 
@@ -506,13 +506,13 @@ Based on the GLSL notch-filter approach shared by [u/Haiku-575 on r/StableDiffus
 - **No grain on white borders.** A Polaroid or print border is detected and left bit-exact, and flat paper white inside the picture gets no grain.
 - **The same amount at every ISO**, matched by eye; the presets used to read louder as they got coarser.
 - **ISO names checked against real film stock.** The look that was called ISO 200 is ISO 400 on cheap film, so every preset moved up one stop, ISO 6400 was added and ISO 100 extrapolated. The default is ISO 400, the same look as before.
-- **Texture match limit 1.4 times instead of 2.** Night scenes reached 2 times and, with the extra grain in the darks, came out speckled.
+- **Texture match limit lowered from 2 times to 1.4.** Night scenes reached 2 times and, with the extra grain in the darks, came out speckled.
 - **Optical stages:** softness, halation, bloom and highlight roll-off, each 0 to 100 and off by default, before the grain. See [Beyond grain](#beyond-grain).
 
 ### 2026-10-04
 
 - **Film grain: same visible grain on textured images** (new control, on by default). Texture an image already has hides part of the grain added to it, so textured and already grainy images now get more grain, up to double, to show as much as a clean image does; clean renders get exactly the strength's amount. A first version of this control, briefly on `main`, did the opposite and scaled grain *down* on clean renders, which made the default invisible on exactly the images that need grain most. See [Film emulation](#film-emulation).
-- **Film grain: gentler size scaling.** The blob size now grows with the square root of the image's long side instead of in proportion, so a preset looks the same at 100 percent across sizes (1536 against 1024: 1.22 times instead of 1.5).
+- **Film grain: gentler size scaling.** The blob size now grows with the square root of the image's long side, so a preset looks the same at 100 percent across sizes (1536 against 1024: 1.22 times, down from 1.5 in proportion).
 - **Film grain: status line without commas.** "monochrome, luma grain only" made Forge write the whole `Film grain result` value in quotes; it now reads "monochrome (luma grain only)".
 
 ### 2026-10-03
@@ -529,9 +529,9 @@ Based on the GLSL notch-filter approach shared by [u/Haiku-575 on r/StableDiffus
 
 ### 2026-09-21
 
-- **Forge Neo extension.** The same node, as a `VAE DeGrid` accordion in [Forge Neo](#forge-neo). It filters inside the VAE decode rather than after it, so the hires-fix first pass is cleaned before the upscaler sees it. Adds a `Clean threshold` control (the node keeps its fixed 0.5/255).
+- **Forge Neo extension.** The same node, as a `VAE DeGrid` accordion in [Forge Neo](#forge-neo). It filters inside the VAE decode, so the hires-fix first pass is cleaned before the upscaler sees it. Adds a `Clean threshold` control (the node keeps its fixed 0.5/255).
 - `degrid_core.degrid()` takes an optional `threshold` (default unchanged), and the status-line text moved into `degrid_core.status_line()` so every front end describes a result in the same words. Cleaned images are identical to before.
-- The status line now says **partially removed** when the clamp limit was too low to subtract the whole grid, with the residual amplitude, instead of claiming "removed" for whatever the detector saw. `stats` gains `residual_255`. The `edges protected` figure lost its colon so Forge does not quote the value in the parameters.
+- The status line now says **partially removed** when the clamp limit was too low to subtract the whole grid, with the residual amplitude; it used to claim "removed" for whatever the detector saw. `stats` gains `residual_255`. The `edges protected` figure lost its colon so Forge does not quote the value in the parameters.
 - README: measured the Wan2.1 VAE upscale2x decoder as an alternative to degridding (see [Swapping the decoder instead](#swapping-the-decoder-instead)): gridded at 2x, clean after its own downscale to 1x; the lattice comes from the decoder, not the latent.
 - **SwarmUI extension.** `DeGridExtension.cs` at the repo root, see [SwarmUI](#swarmui): the node is inserted after the final decode and after a pixel-space refiner decode, with a version check against the installed node.
 - **Node: optional `threshold` input** (/255, default 0.5), the control Forge already had, so all three hosts share one parameter surface. The node also prints its status line to the backend console.
@@ -552,8 +552,8 @@ It now measures the grid itself. A VAE grid lands on the same pixel positions ac
 The detail, for anyone who wants it:
 
 - **Qwen Image 2.1 confirmed affected.** It ships a genuinely different VAE — `modelspec.architecture: qwen_image_2.1_vae`, a 64-channel latent and four spatial upsample stages, against 16 channels and three for the Qwen-Image / Wan 2.1 VAE — so it compresses considerably harder. The artifact is nonetheless the **same 2px lattice**, measured on native decodes at 1.6–2.0/255 with checkerboard and both stripe orientations at comparable strength. That is expected: the period of this artifact is set by the stride of the *final* upsample stage, which is still 2, not by how deep the VAE is or how wide its latent is. There is no 16px "latent grid" to chase even though the VAE now compresses 16× — a phase-fold sweep over periods 5–12 shows only the even-period harmonics of the 2px component, and an exact-bin comb test reads flat at p=4/8/16/32.
-- **Fixed a backwards grid detector.** The reported `grid ≈ X/255` was the 75th percentile of the filter's own correction, which measures how *detailed* an image is rather than how gridded — on real files it read higher on the cleanest image than on the most gridded one. It is now a phase-locked lattice measurement. The notch, the clamp and the auto limit are unchanged, so results on images that do have a grid are identical to before.
-- **New `skip_when_clean` widget (default on).** An image with no lattice is now passed through bit-for-bit instead of being quietly filtered. Previously every grid-free image lost ~0.7–1.1/255 mean (up to 4.5/255 peak) of genuine high-frequency detail for nothing.
+- **Fixed a backwards grid detector.** The reported `grid ≈ X/255` was the 75th percentile of the filter's own correction, which measures how *detailed* an image is: on real files it read higher on the cleanest image than on the most gridded one. It is now a phase-locked lattice measurement. The notch, the clamp and the auto limit are unchanged, so results on images that do have a grid are identical to before.
+- **New `skip_when_clean` widget (default on).** An image with no lattice now passes through bit-for-bit. Before, it was quietly filtered, and every grid-free image lost ~0.7–1.1/255 mean (up to 4.5/255 peak) of genuine high-frequency detail for nothing.
 - Status line now names the dominant orientation and no longer claims to have removed a grid that was not there.
 
 ### 2026-07-04
