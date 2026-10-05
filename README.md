@@ -1,10 +1,36 @@
 # ComfyUI-DeGrid
 
-**VAE DeGrid (Nyquist Notch)** — a ComfyUI node and a Forge Neo extension that remove the 2px pixel grid that the Qwen Image VAE (and, to a lesser extent, the Wan 2.1 VAE) leaves across decoded images. Affects Krea2, Qwen Image, **Qwen Image 2.1**, Anima and anything else built on those VAEs.
+Three post-processing tools for images from diffusion models, one repo, three hosts: ComfyUI, Forge Neo and SwarmUI. Every host runs the same maths files.
 
-The artifact is easy to miss at 100% zoom, but it gets amplified by any sharpening or upscaling applied afterwards. This node erases it exactly, with auto-calibration so there is nothing to tune.
+## Overview
 
-It reads worst in flat, dark areas — a lattice of fixed amplitude has the most local contrast to sit against where the image itself is smooth.
+- **VAE DeGrid (Nyquist Notch)** removes the 2 px pixel grid that the Qwen Image VAE, and to a lesser extent the Wan 2.1 VAE, leaves across decoded images: Krea 2, Qwen Image, Qwen Image 2.1, Anima and anything else built on those VAEs. The grid is easy to miss at 100 % zoom, reads worst in flat, dark areas, and any sharpening or upscaling afterwards amplifies it. The notch erases it exactly and calibrates itself, so there is nothing to tune. Its chapters run from [Install (ComfyUI)](#install-comfyui) to [Swapping the decoder instead](#swapping-the-decoder-instead).
+- **VAE Enhance (Flux.2 round trip)**, optional, re-draws fine texture (skin pores, fur, hair) by pushing the finished image through a Flux.2 VAE. See [VAE Enhance](#vae-enhance-flux2-round-trip).
+- **Film Emulation**, optional, makes the final image look shot on film: grain whose size and amount follow exposure, plus softness, halation, bloom and highlight roll-off. See [Film emulation](#film-emulation).
+
+On the final image they run in that order, and each works without the others.
+
+## Contents
+
+- [Front ends](#front-ends)
+- [Install (ComfyUI)](#install-comfyui)
+- [Quick start](#quick-start)
+- [Settings](#settings)
+  - [Status line](#status-line)
+- [Reading the removed_grid preview](#reading-the-removed_grid-preview)
+- [Troubleshooting](#troubleshooting)
+- [Forge Neo](#forge-neo)
+  - [Where it runs](#where-it-runs-and-why-that-matters), [Controls](#controls), [Notes](#notes)
+- [Swapping the decoder instead](#swapping-the-decoder-instead)
+- [VAE Enhance (Flux.2 round trip)](#vae-enhance-flux2-round-trip)
+  - [Idea](#where-the-idea-came-from), [Research](#what-the-research-showed), [What we made](#what-we-made), [Examples](#what-it-looks-like), [Forge Neo](#forge-neo-details), [Settings](#settings-1), [Limits](#what-it-cannot-do), [Tests](#tests)
+- [Film emulation](#film-emulation)
+  - [Why grain](#why-film-grain), [Why not prompt](#why-not-prompt-for-it), [Noise and grain](#noise-grain-and-grading-tools), [Grain size](#grain-size-follows-exposure), [Beyond grain](#beyond-grain), [Calibration](#calibration), [Where it goes](#where-it-goes), [Tests](#tests-1)
+- [SwarmUI](#swarmui)
+  - [Install](#install), [Use](#use), [VAE Enhance](#vae-enhance-in-swarmui), [Film Emulation](#film-emulation-in-swarmui), [Notes](#notes-1)
+- [How it works](#how-it-works)
+- [Changelog](#changelog)
+- [License](#license)
 
 ## Front ends
 
@@ -297,37 +323,83 @@ which builds the Flux.2 VAE from `<forge-neo>/models/VAE` through the Forge back
 
 ## Film emulation
 
-An optional last stage, off by default, that makes each final image look shot on film: film grain, plus four optical stages (softness, halation, bloom, highlight roll-off) that are each off until you turn them up. Not an artefact fix: a small amount of correlated noise makes a smooth decode read as more detailed, which is the opposite of the plastic look the other two tools fight, and which the model only produces when prompted for it. The optics add what grain alone cannot: without halation and a gentler highlight, grain on a digital render reads as noise on a digital render.
+The last stage before saving, off by default: film grain, then softness, halation, bloom and highlight roll-off. One core file, `film_emulation_core.py`, for all three hosts.
 
-### What it looks like
+![Film emulation in Forge Neo](scr/film-emulation-screenshot.png)
 
-Grain on the smooth-skin shot at 1:1, which is how grain should be judged: no grain, then ISO 200, 400 (the default) and 1600 at grain 50. The amount you see is the same on all three; only the character changes.
+### Why film grain
+
+Part of it is taste. Film is a look people choose on purpose, and grain is the first thing that says "film".
+
+The other part is perception. A clean decode looks plastic. The right amount of grain makes the same picture look sharper and more detailed, because the eye takes the fine texture for detail. Add too much, and perceived sharpness drops again.
+
+The smooth-skin shot at 1:1: no grain, then ISO 200, 400 (the default) and 1600 at grain 50.
 
 ![film grain presets at grain 50](scr/sheet-film-emulation-grain.png)
 
-Grain follows the tone. In the default `print` mode the night sky and the shadows get the most grain and the coarsest, the lit wall less and finer; `negative` moves it into the highlights. The black-and-white street is detected as monochrome and gets luma grain only, identical on all three channels to the last bit.
+### Why not prompt for it
+
+Krea 2 draws film grain when asked. Sometimes it looks like film, often it does not, and it cannot be steered: the words that bring the grain also change the picture, and the amount and size are whatever the model decides. Nothing turns them up or down afterwards. For the renders used here I put `film grain, blurry` in the negative prompt to get clean images.
+
+### Noise, grain and grading tools
+
+Most grain extensions add noise: every pixel independent, the same size everywhere, often the same strength in every tone. That is a digital sensor. Film grain is developed silver, or dye clouds in colour film: blobs one to three pixels across that clump together, with size and count set by how much light reached each spot.
+
+Grading tools with good film emulation exist. They are stand-alone: one more program, one more pass over every image, and overkill when all you need is a generated image that looks like film.
+
+### Grain size follows exposure
+
+Grain is stronger in the darks; most implementations get that far. Grain *size* changes across the frame too.
+
+An emulsion holds silver halide crystals of many sizes, and a large crystal needs fewer photons to form a latent image than a small one. Where little light arrives, only the large crystals collect enough to develop, so underexposed areas show sparse, large, clumpy grains. Where plenty of light arrives, crystals of every size develop and their small grains overlap into a fine, even texture. In one frame, grain is always finer in the highlights and coarser wherever the film was underexposed.
+
+So grain slapped on top won't look right if you're after the best reproduction. That holds for realistically rendered grain, for scans of real developed film, and for grain whose strength varies between dark and light areas, as long as its size stays the same across the frame.
+
+Here, two noise fields from the same seed are blended by luma: 1.35 times the preset's blob size in the shadows, 1/1.35 in the highlights, with more clumping in the shadows. The blend is renormalised, so tone changes the size and clumping and leaves the amount alone.
+
+The amount per tone comes from **Film type**:
+
+- `print` (the default) for prints and reversal slides, which is what the model draws: the most grain in the shadows, 1.6 times the midtone amount at luma 0.22, about half that near black, a third at 0.80 and none from 0.95 up.
+- `negative` for a negative scan: more in the highlights (1.3 times at 0.85), less in the shadows.
+
+Near black and white, grain is held to half the distance to black or white, so it never clips.
+
+The night street at 1:1: no grain, `print`, `negative`. Below it, a black-and-white street, detected as monochrome and given luma grain only.
 
 ![grain by tone, print against negative, and on a monochrome image](scr/sheet-film-emulation-tone.png)
 
-A white photo border gets none: the Polaroid frame comes out bit-exact, while the picture inside it gets the grain.
+**No grain on paper.** Grain lives in the emulsion. A uniform light band along at least three edges, with a busy picture inside, is a print or Polaroid border and comes out bit-exact. Flat, bright, grey patches inside the picture (paper white) get no grain either.
 
 ![a Polaroid border left untouched](scr/sheet-film-emulation-frame.png)
 
-The optical stages at 50 each, grain off: softness on the face, halation around the lamp, bloom around the backlit hair, roll-off on the studio backdrop.
+**Colour.** Luma grain adds the same value to R, G and B, so grey stays grey to the last bit. Colour grain varies the colour a pixel already has, in proportion to its saturation, and never moves the hue: a neutral wall gets none, a sepia print only varies its toning. An image with a mean chroma under 8/255 (a "B&W" decode with a slight cast) counts as monochrome and gets luma grain only. **Colour grain** `auto` does exactly that; `off` forces luma grain on any image; `on` allows colour grain on a faintly tinted image.
+
+### Beyond grain
+
+Grain alone on a digital render looks like grained digital. Film is also about what light does inside the camera, and four optical stages add that. Each is 0 to 100, off at 0, and runs before the grain, because grain sits in the emulsion and is never blurred or glowed.
+
+- **Halation.** Bright light passes through the emulsion, reflects off the film base and exposes the red-sensitive layer next to the base a second time: a red-orange glow around lamps, windows and speculars, strongest on film without an anti-halation layer (CineStill). It is keyed on luminance or red, whichever is higher, so a red neon halates and a blue light hardly does. Neutral on monochrome images. Radius 0.6 and 2 percent of the long side.
+- **Bloom.** A wide, soft glow in the light's own colour, as from a diffusion filter or lens glare, at 2 and 8 percent of the long side. At 50, a haze around backlit hair; at 100, the picture washes out.
+- **Softness.** A lens and an emulsion resolve less than a render. A blend toward a 1 px Gaussian, scaled with image size like the grain.
+- **Highlight roll-off.** Film bends into a shoulder where a render clips. The brightest channel is compressed from sRGB 0.70 up, hue kept; pure white lands at about 237/255 at 25, 226 at 50 and 214 at 100. It also takes the light halation and bloom push past white.
+
+Halation and bloom add only the glow in excess of its source: a uniform bright area gets nothing, a lamp keeps its brightness, the dark surroundings get the whole glow. Softness, halation and bloom work in linear light. A detected border is left out of all four: they run on the picture inside it, so paper never glows into the picture.
+
+Each stage at 50, grain off: softness on the face, halation around the lamp, bloom around the backlit hair, roll-off on the studio backdrop.
 
 ![softness, halation, bloom and highlight roll-off at 50](scr/sheet-film-emulation-optics.png)
 
-### Grain
+### Calibration
 
-A seeded noise field, blurred to the grain's blob size, clumped a little for the faster presets and added to the colour channels. The seed is the image's own generation seed, so a batch gets different grain per image and a re-run gives the same.
+Everything was judged by eye, grain at 1:1, on clean renders.
 
-- **ISO** sets the grain's *character* and never its amount: blob size, how clumpy it is and how much colour grain a colour image gets. The names were checked against real film stock: ISO 400, the default, is the grain Krea 2 draws itself when prompted for film grain, and looks like a cheap ISO 400 or a fine ISO 800 stock. ISO 100 and 200 are near-white and blend into skin as fine texture; ISO 800 and up are larger, clumpier blobs that sit on the image, with more colour grain on saturated colours.
-- **Grain** 0 to 100 sets the amount alone, at a mid grey (luma 0.45): 0 is off, 1 is 0.3/255 and under the eye's threshold, 50 is 3.3/255, the just-noticeable difference in midtones, so it reads as texture rather than noise, and 100 is 8/255, a bit noisy. The model's own prompted grain measures about 4/255, grain 60.
-- **The same amount at every ISO.** Coarse, clumpy grain reads louder than fine grain of the same amplitude, so each preset's amplitude is scaled to look as loud as ISO 400 at the same setting. ISO 200, 1600 and 6400 were matched by eye against ISO 400 at grain 50 and 100; the picks follow the square root of the blob size, which sets the other presets.
-- **Film type** sets how much grain each tone gets. `print` (the default) is a print or a reversal slide, which is what the model draws: the most grain in the shadows (1.6 times the midtone amount at luma 0.22), about half that near black, less in the mids, little in the brights (a third at 0.80) and none from 0.95 up. The peak sat at 0.10 at first, and a night sky sparkled with fine grain. `negative` is a negative scan, with more grain in the highlights (1.3 times at 0.85) and less in the shadows. Near black and white the grain is held to half the distance to black or white, so it never clips into raised blacks.
-- **Size follows exposure**, whatever the film type. On film only the largest, most sensitive crystals catch enough light in an underexposed area to develop, so shadows show sparse, coarse, clumpy grain, and where much light arrived crystals of every size develop into fine grain. The field is two fields blended by luma: 1.35 times the preset's blob size in the shadows, 1/1.35 in the highlights, with a little more clumping in the shadows.
-- **No grain on paper.** A uniform light band along at least three edges of the image, with a busy picture inside, is a print or Polaroid border and gets no grain at all; flat, bright, grey patches inside the picture (a paper-white highlight) get none either. Grain lives in the emulsion, not on the paper.
-- **Same visible grain on textured images** (on by default) keeps the amount of grain you can *see* the same on every image. Texture an image already has hides part of the grain added to it: the eye's threshold for a pattern rises with the contrast of whatever it sits on. A clean render shows every bit of the grain and gets exactly the setting's amount; a textured or already grainy render gets more. The stage measures the image's texture floor, the quietest tenth of the midtone areas of the picture; at or below 1.1/255 the image counts as clean, above it the amount rises with the floor to the power 0.6 (the slope of contrast masking), at most 1.4 times and at most 12/255. It never reduces the amount. Off gives exactly the setting's amount on every image.
+- **Grain scale.** Anchored on the midtone just-noticeable difference of about 3/255, at mid grey (luma 0.45): grain 1 is 0.3/255, under the threshold; 50 is 3.3/255, at it, where grain reads as texture; 100 is 8/255, visibly noisy. The model's own prompted grain measures about 4/255, grain 60.
+- **ISO character.** The presets were first fitted to the grain Krea 2 draws when prompted: a neighbour correlation of 0.34 after a 9 px high-pass, 0.35 for the matching preset. Then I compared them with my own film stock. That look is ISO 400 on cheap film, ISO 800 on expensive film, so every preset moved up a stop. ISO 400 is the default, ISO 6400 is the old 3200, and ISO 100 is extrapolated and was never judged by eye.
+- **Equal loudness.** Coarse, clumpy grain looks louder than fine grain of the same amplitude. ISO 200, 1600 and 6400 were matched against ISO 400 at grain 50 and 100: a ladder of amplitudes per preset, and the rung that looks as loud as the reference wins. The picks follow the square root of the blob size, and that rule sets the other presets.
+- **Size against resolution.** The blob size grows with the square root of the long side: 0.82 times at 1024 px, 1.15 times at 2048. Scaled in full proportion, a 1536 px image looked a step coarser at 100 percent than a 1024 px one; unscaled, a large image's grain vanishes at fit-to-screen.
+- **Tone curve.** The `print` peak first sat at luma 0.10, and a dark night sky sparkled. It moved to 0.22, with half the amount near black.
+- **Textured images.** Texture an image already has hides part of the added grain: the visibility threshold rises with the contrast underneath, with a slope of about 0.6. With **Same visible grain on textured images** on (the default), the stage measures the texture floor, the quietest tenth of the picture's midtone areas. Up to 1.1/255 the image counts as clean and gets exactly the setting's amount; above that, the amount rises with the floor to the power 0.6, to at most 1.4 times and 12/255. The first version went the other way and lowered the grain on clean renders, which made grain 50 invisible exactly where grain is needed. The cap started at 2; night scenes reached it first and, with the dark weighting on top, put 11/255 into the shadows.
+- **Optics.** Ladders of 0, 25, 50 and 100, with a difference row under each rung. The first set changed up to a third of the pixels by more than 8/255 and still could not be seen: renders already draw a glow around their lights, and an added glow no wider or redder than that one, or a shoulder above sRGB 0.85, leaves the same picture. After a retune, the look I picked sat at 25; the scales were halved to put it at 50, and 100 is too much on purpose.
 
 | image | texture floor | factor | grain 50 gives |
 |---|---|---|---|
@@ -335,8 +407,6 @@ A seeded noise field, blurred to the grain's blob size, clumped a little for the
 | smooth-skin portrait | 1.23/255 | 1.07 | 3.5/255 |
 | cat on a sofa | 2.14/255 | 1.40 | 4.6/255 |
 | night street | 6.73/255 | 1.40 | 4.6/255 |
-
-The limit was 2 times at first. Night scenes were the first images to reach it, and together with the extra grain in the darks they put 11/255 into the shadows, far more than the same setting on a clean render; at 1.4 they got 7.8, and with the lower near-black amount since, about 7 in the shadows and 5 near black.
 
 | ISO | blob size at a 1536 px long side, highlights to shadows | neighbour correlation at mid grey | kurtosis | colour grain | amplitude at grain 50 |
 |---|---|---|---|---|---|
@@ -348,45 +418,29 @@ The limit was 2 times at first. Night scenes were the first images to reach it, 
 | 3200 | 0.70-1.28 px | 0.69 | 3.9 | 25 % | 2.4/255 |
 | 6400 | 0.89-1.62 px | 0.77 | 4.1 | 35 % | 2.2/255 |
 
-ISO 100 was extrapolated from the others and not judged by eye. Neighbour correlation is measured after a 9 px high-pass, as it was on the model's own grain (0.34). The blob size grows with the square root of the image's long side: a 1024 px image gets 0.82 times the table's size, a 2048 px one 1.15 times. Scaling it in full proportion, as film grain on a print would, made the same preset look one step coarser at 1536 than at 1024 when viewed at 100 percent, which is how grain is judged; not scaling at all would make a large image's grain vanish in a fit-to-screen view. The square root splits the difference.
-
-**Colour.** Luma grain is the same value added to R, G and B, so a grey pixel stays grey exactly. Colour grain is a multiplicative fluctuation of the colour a pixel already has: proportional to its saturation, never changing its hue. A neutral wall inside a colour photo gets no colour grain, a sepia print only varies its toning, and an image whose mean chroma is under 8/255 (a "B&W" decode with a slight cast) is treated as monochrome and gets none at all. The `colour_grain` control is `auto` for that behaviour, `off` to force luma-only grain on any image, `on` to allow colour grain on a faintly tinted image.
-
-### Optics
-
-Four stages, each 0 to 100 and off at 0, in the order light meets them, all before the grain, because grain sits in the emulsion and is never blurred or glowed. Softness, halation and bloom work in linear light. A detected white border is left out of every stage: they run on the picture inside it, so paper never glows into the picture.
-
-- **Softness** lowers acutance slightly, as a lens and an emulsion do: a blend toward a 1 px Gaussian (at a 1536 px long side, scaled like the grain). 25 to 50 reads as a print rather than a render; 100 is soft.
-- **Halation** is light that passes through the emulsion, reflects off the film base and exposes the red-sensitive layer next to it a second time: a red-orange glow around bright lights, strongest on film without an anti-halation layer (CineStill). It is keyed on luminance or red, whichever is higher, so a red neon halates and a blue light hardly does, and it is neutral on monochrome images. Its radius is 0.6 and 2 percent of the picture's long side.
-- **Bloom** is a wide, soft glow in the light's own colour, as from a diffusion filter or lens glare, at 2 and 8 percent of the long side. At 50 it puts a haze around backlit hair; at 100 it washes the picture out.
-- **Highlight roll-off** replaces the hard digital clip with a film shoulder on the brightest channel, from sRGB 0.70 up, keeping the hue. It lowers white: pure white lands at about 237/255 at 25, 226 at 50 and 214 at 100. It also takes the light halation and bloom add above white.
-
-Halation and bloom add only the glow in excess of the local source. A uniform bright area therefore gets nothing, the inside of a lamp is not dimmed, and the dark surroundings get the whole glow. The first version added the glow everywhere and blew a light-grey studio backdrop out to pure white.
-
-The strengths were set by eye on ladders of 0, 25, 50 and 100, so that 50 is the look picked and 100 is clearly too much. A first set changed the pixels a lot and could not be seen at all: renders already draw a glow around their lights, and a glow no wider and no redder than that one, or a shoulder that only starts at sRGB 0.85, reads as the same picture.
+The fitted preset measures 0.29 at mid grey today: it was fitted as a single field, before grain size followed exposure.
 
 ### Where it goes
 
-Last. Anything after it, a resize, an upscaler, a re-encode, resamples the grain into blobs twice the size or averages it away. In ComfyUI, wire the **Film Emulation** node directly into Save, after VAE DeGrid and VAE Enhance if you use them. In Forge Neo the **Film emulation** accordion runs on each final image after the other two accordions and never on the hires-fix first pass, and does not need either of them to be on; it writes `Film emulation: iso=ISO400;grain=50;chroma=auto;match=1;film=print;soft=0;halation=0;bloom=0;rolloff=0` and a `Film emulation result` line to the parameters, and images made before the rename, with `Film grain: ...;strength=...`, still restore into it. In SwarmUI the **Film Emulation** group is inserted after the other two steps on the final decode.
+Last. A resize, an upscaler or a re-encode after it resamples the grain into blobs twice the size or averages it away.
 
-On every host the status line reports the applied amplitude, the measured midtone amplitude, the texture match, the blob sizes, the colour decision, the optics that are on, a detected border and the seed. On a clean render the amount is the setting's:
+- **ComfyUI:** wire the **Film Emulation** node straight into Save, after VAE DeGrid and VAE Enhance if you use them.
+- **Forge Neo:** the **Film emulation** accordion runs on each final image after the other two accordions, never on the hires-fix first pass, and works with them off. It writes `Film emulation: iso=ISO400;grain=50;chroma=auto;match=1;film=print;soft=0;halation=0;bloom=0;rolloff=0` and a `Film emulation result` line to the parameters. Images made before the rename, with `Film grain: ...;strength=...`, restore into it too.
+- **SwarmUI:** the **Film Emulation** group runs after the other two steps on the final decode.
+
+The grain seed is the image's own generation seed: a batch gets different grain per image, a re-run gets the same. The status line reports the applied and measured midtone amplitude, the texture match, the blob sizes, the colour decision, the optics in use, a detected border and the seed. A clean render, the night street with optics, a Polaroid:
 
 ```
 grain ISO 400 strength 50 · 3.3/255 midtone (measured 3.4) · x1.00 for texture floor 0.68/255 · blob 0.39-0.72 px · colour grain 8% · seed 42
-```
-
-On the night street with optics on, and on a Polaroid:
-
-```
 grain ISO 400 strength 50 · 4.6/255 midtone (measured 5.0) · x1.40 for texture floor 5.88/255 · blob 0.39-0.72 px · colour grain 8% · softness 25 halation 50 bloom 25 roll-off 50 · seed 42
 grain ISO 400 strength 50 · 4.4/255 midtone (measured 4.7) · x1.33 for texture floor 1.78/255 · blob 0.39-0.72 px · colour grain 8% · frame excluded 104/351/83/78 px · seed 42
 ```
 
-Judge the result at 100 percent. A downscaled preview hides grain and a 2:1 view exaggerates every preset. The optics need the whole picture: a glow belongs to the frame, not to a crop. With everything on, a 1280x1728 image takes about 0.25 s on a CPU and 0.03 s on a GPU.
+Judge grain at 100 percent: a downscaled preview hides it and 2:1 exaggerates it. Judge the optics on the whole picture. With everything on, a 1280x1728 image takes about 0.25 s on a CPU and 0.03 s on a GPU.
 
 ### Tests
 
-`tests/test_film_emulation.py` checks the strength anchors, the per-preset statistics (correlation rising with ISO, kurtosis above 3, isotropy), equal loudness across ISO, the tone curves of both film types, coarser and clumpier grain in the shadows, unit variance of the blended field at every exposure, black and white getting nothing and near-black never more than the headroom, grey staying bit-exactly grey, sepia keeping its hue, a neutral patch inside a colour image getting no colour grain, the monochrome detector, the texture match, the border detector (exact on a Polaroid, nothing on a plain photo or a sky along one edge), paper white getting no grain, and for the optics: off is exactly the grain-only result, softness keeping the light and lowering acutance, halation red around a light and neutral on monochrome, a red light halating and a blue one not, bloom in its source's colour and never on a bright backdrop or inside a lamp, the roll-off being a monotone, hue-keeping shoulder, and a border staying bit-exact with every stage at 100. The node and the Forge script have their own wiring tests, including the paste of old `Film grain:` infotexts.
+`tests/test_film_emulation.py` covers the grain scale, equal loudness across ISO, both tone curves, coarser and clumpier grain in the shadows, the renormalised blend, the headroom near black and white, grey staying grey, sepia keeping its hue, the monochrome detector, the texture match, the border detector (exact on a Polaroid, silent on a plain photo and on a sky along one edge) and paper white. For the optics: all at 0 equals the grain-only result, softness moves light without adding any, halation is red around a light and neutral on monochrome, a red light halates and a blue one does not, bloom keeps its source's colour and never lands on a bright backdrop or inside a lamp, the roll-off is a monotone, hue-keeping shoulder, and a border stays bit-exact with every stage at 100. The node and the Forge script have their own wiring tests, including the paste of old `Film grain:` infotexts.
 
 ## SwarmUI
 
@@ -453,7 +507,7 @@ Based on the GLSL notch-filter approach shared by [u/Haiku-575 on r/StableDiffus
 - **The same amount at every ISO**, matched by eye; the presets used to read louder as they got coarser.
 - **ISO names checked against real film stock.** The look that was called ISO 200 is ISO 400 on cheap film, so every preset moved up one stop, ISO 6400 was added and ISO 100 extrapolated. The default is ISO 400, the same look as before.
 - **Texture match limit 1.4 times instead of 2.** Night scenes reached 2 times and, with the extra grain in the darks, came out speckled.
-- **Optical stages:** softness, halation, bloom and highlight roll-off, each 0 to 100 and off by default, before the grain. See [Optics](#optics).
+- **Optical stages:** softness, halation, bloom and highlight roll-off, each 0 to 100 and off by default, before the grain. See [Beyond grain](#beyond-grain).
 
 ### 2026-10-04
 
